@@ -1,0 +1,72 @@
+{
+  "cycles": {
+    "1": {
+      "DESCENDING": {
+        "duration_s": 34.37,
+        "max_n": 4.657,
+        "mean_n": 0.465,
+        "min_n": 0.0,
+        "n_samples": 4249,
+        "overshoot_n": 3.657,
+        "std_n": 0.689,
+        "target_n": 1.0
+      },
+      "HOLD": {
+        "duration_s": 5.61,
+        "final_window": {
+          "max_n": 1.347,
+          "mean_n": 1.221,
+          "min_n": 1.106,
+          "n_samples": 135,
+          "std_n": 0.047
+        },
+        "max_n": 1.464,
+        "mean_n": 1.223,
+        "min_n": 1.068,
+        "n_samples": 710,
+        "std_n": 0.055,
+        "target_n": 1.0
+      },
+      "SLIDING": {
+        "duration_s": 9.66,
+        "lateral_dist_mm": 29.7,
+        "mae_vs_target_n": 0.988,
+        "max_n": 6.032,
+        "mean_n": 0.053,
+        "min_n": 0.0,
+        "n_samples": 1136,
+        "std_n": 0.353,
+        "target_n": 1.0
+      }
+    }
+  },
+  "cycles_detected": 1,
+  "duration_s": 50.43,
+  "n_samples": 6185,
+  "params": {
+    "approach_speed_mms": 40.0,
+    "depth_mm": 60.0,
+    "force_n": 1.0,
+    "hold_stable_s": 3.0,
+    "hold_timeout_s": 5.0,
+    "hold_tol_n": 0.20000000298023224,
+    "home_deg": [
+      82.8968734741211,
+      13.36577033996582,
+      -159.1376953125,
+      55.77,
+      90.0,
+      0.0
+    ],
+    "kd": 0.0,
+    "ki": 0.0,
+    "kp": 0.0,
+    "mode": "SLIDE",
+    "repeats": 1,
+    "slide_dir": "+Y",
+    "slide_dist_mm": 190.0,
+    "speed_factor_pct": 10.0,
+    "speed_mms": 20.0
+  },
+  "target_force_n": 1.0
+}

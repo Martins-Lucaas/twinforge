@@ -1,0 +1,61 @@
+{
+  "cycles": {
+    "1": {
+      "DESCENDING": {
+        "duration_s": 26.34,
+        "max_n": 5.743,
+        "mean_n": 0.275,
+        "min_n": 0.0,
+        "n_samples": 3327,
+        "overshoot_n": 4.743,
+        "std_n": 0.736,
+        "target_n": 1.0
+      },
+      "HOLD": {
+        "duration_s": 5.63,
+        "final_window": {
+          "max_n": 3.143,
+          "mean_n": 2.584,
+          "min_n": 1.727,
+          "n_samples": 120,
+          "std_n": 0.276
+        },
+        "max_n": 7.088,
+        "mean_n": 1.727,
+        "min_n": 0.0,
+        "n_samples": 674,
+        "std_n": 1.042,
+        "target_n": 1.0
+      }
+    }
+  },
+  "cycles_detected": 1,
+  "duration_s": 37.68,
+  "n_samples": 4717,
+  "params": {
+    "approach_speed_mms": 40.0,
+    "depth_mm": 60.0,
+    "force_n": 1.0,
+    "hold_stable_s": 4.0,
+    "hold_timeout_s": 5.0,
+    "hold_tol_n": 0.30000001192092896,
+    "home_deg": [
+      82.8968734741211,
+      13.36577033996582,
+      -159.1376953125,
+      55.77,
+      90.0,
+      0.0
+    ],
+    "kd": 0.0,
+    "ki": 0.0,
+    "kp": 0.0,
+    "mode": "TOUCH",
+    "repeats": 1,
+    "slide_dir": "+Y",
+    "slide_dist_mm": 50.0,
+    "speed_factor_pct": 10.0,
+    "speed_mms": 5.0
+  },
+  "target_force_n": 1.0
+}
