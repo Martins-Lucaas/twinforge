@@ -1,0 +1,45 @@
+{
+  "cycles": {
+    "1": {
+      "DESCENDING": {
+        "duration_s": 0.63,
+        "max_n": 0.0,
+        "mean_n": 0.0,
+        "min_n": 0.0,
+        "n_samples": 75,
+        "overshoot_n": -1.0,
+        "std_n": 0.0,
+        "target_n": 1.0
+      }
+    }
+  },
+  "cycles_detected": 1,
+  "duration_s": 1.35,
+  "n_samples": 165,
+  "params": {
+    "approach_speed_mms": 30.0,
+    "depth_mm": 60.0,
+    "force_n": 1.0,
+    "hold_stable_s": 3.0,
+    "hold_timeout_s": 5.0,
+    "hold_tol_n": 0.15000000596046448,
+    "home_deg": [
+      81.38963317871094,
+      8.127357482910156,
+      -152.8006134033203,
+      54.67,
+      90.0,
+      6.693056106567383
+    ],
+    "kd": 0.0,
+    "ki": 0.0,
+    "kp": 0.0,
+    "mode": "TOUCH",
+    "repeats": 1,
+    "slide_dir": "+Y",
+    "slide_dist_mm": 50.0,
+    "speed_factor_pct": 10.0,
+    "speed_mms": 5.0
+  },
+  "target_force_n": 1.0
+}

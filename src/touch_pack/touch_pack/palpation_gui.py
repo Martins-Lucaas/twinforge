@@ -151,9 +151,12 @@ _REF_T_RE = re.compile(r"t=(\d+)")
 # Faixas dos parâmetros — adequadas ao protocolo Gupta et al. 2021.
 SPEED_MIN, SPEED_MAX, SPEED_DEFAULT = 1.0,  30.0,  10.0    # mm/s
 FORCE_MIN, FORCE_MAX, FORCE_DEFAULT = 0.2,   5.0,   1.0    # N (apenas display)
-# Velocidade de aproximação (CONTACT/RETRACT) — perfil fast→slow no
-# explorer usa este valor como max; min é derivado como 20 % do max.
-APPROACH_MIN, APPROACH_MAX, APPROACH_DEFAULT = 5.0, 100.0, 50.0  # mm/s
+# Velocidade da DESCIDA em modo MovL (robô real), em % de SpeedFactor. A
+# descida é UM RelMovL contínuo cuja velocidade = SpeedFactor; este slider a
+# controla direto. Valores BAIXOS = descida lenta e menos overshoot no contato
+# (o robô é rápido mesmo em % baixo). No modo streaming/Gazebo o explorer usa
+# este mesmo número como velocidade de aproximação (mm/s) — inofensivo.
+APPROACH_MIN, APPROACH_MAX, APPROACH_DEFAULT = 1.0, 30.0, 1.0   # % SpeedFactor
 
 SPEED_FACTOR_MIN, SPEED_FACTOR_MAX, SPEED_FACTOR_DEFAULT = 1, 100, 10  # %
 # At SPEED_FACTOR_DEFAULT (10 %), Gazebo trajectory duration = 3.0 s.
@@ -840,7 +843,12 @@ class PalpationGUI(Node):
             frame = self._sensors_tab_frame
             visible = (nb is not None and frame is not None
                        and str(nb.select()) == str(frame))
-            self._set_touch_anim(visible)
+            # Gráficos só animam em IDLE (monitor ao vivo: últimos 5 s de
+            # raster/escalar + heatmap instantâneo). Durante experimento ou
+            # gravação a animação fica PAUSADA — não precisamos atualizar os
+            # gráficos e a CPU vai toda p/ a captura a 1 kHz. Ao voltar p/ idle,
+            # este loop (80 ms) retoma a animação automaticamente.
+            self._set_touch_anim(visible and not self._experiment_active())
             if visible:
                 self._update_sensors_panel()
         finally:
@@ -860,6 +868,22 @@ class PalpationGUI(Node):
             self._touch_anim_running = run
         except Exception as exc:
             log.debug('touch anim toggle falhou: %s', exc)
+
+    def _experiment_active(self) -> bool:
+        """True se há EXPERIMENTO em andamento: palpação rodando (fase !=
+        IDLE/DONE/ABORTED) ou gravação da GUI ligada (_rec_fh aberto).
+
+        É o gatilho central do trade-off de CPU: durante o experimento os
+        gráficos são pausados (não precisamos vê-los) e o republish tátil em
+        ROS fica LIGADO (o palpation_logger consome taxels/eventos); em IDLE é
+        o inverso — gráficos ao vivo e republish DESLIGADO (ninguém consome, e
+        publicar ~16k msg/s a 1 kHz estrangula o GIL e trava a GUI).
+
+        Leitura sem lock de propósito: são duas referências simples e este
+        gate roda no caminho quente (_on_raw_lines, por chunk). Uma corrida na
+        transição só desloca o efeito por um chunk/tick — inofensivo."""
+        return (self._rec_fh is not None
+                or self._latest_phase not in ('IDLE', 'DONE', 'ABORTED'))
 
     def _touch_source_status(self, scalar_fresh: bool) -> tuple[str, str]:
         """Texto/cor honestos da fonte do toque, do estado AO VIVO da fonte.
@@ -1081,11 +1105,16 @@ class PalpationGUI(Node):
         como o plotter de coleta standalone. Fast-path sem lock quando não há
         gravação; sob o lock as linhas vão para os writers (reconferidos, pois
         _stop_recording os zera sob o MESMO lock)."""
-        # Republica o tátil completo em ROS SEMPRE (independe de gravação): é o
-        # que o palpation_logger assina para juntar taxels+eventos no CSV do
-        # experimento. Publish é thread-safe; roda na thread serial.
-        for line in lines:
-            self._publish_tactile_line(line.strip())
+        # Republica o tátil completo em ROS SÓ quando há experimento/gravação
+        # (_experiment_active): é o que o palpation_logger assina para juntar
+        # taxels+eventos no CSV do experimento, e ele SÓ grava durante um run.
+        # Em IDLE ninguém consome, e publicar ~16k msg/s a 1 kHz na thread
+        # serial estrangula o GIL e trava a GUI — daí o gate. Os gráficos ao
+        # vivo NÃO dependem deste republish (leem o estado da fonte direto), so
+        # o monitor em idle segue funcionando. Publish é thread-safe.
+        if self._experiment_active():
+            for line in lines:
+                self._publish_tactile_line(line.strip())
         if self._ref_adc_writer is None:
             return  # fast-path: nada a gravar nos CSVs crus
         with self._lock:
@@ -1543,6 +1572,15 @@ class PalpationGUI(Node):
                          vmin=DEPTH_MIN, vmax=DEPTH_MAX, step=0.5,
                          hint='Maximum safe travel — the descent stops '
                               'earlier, when the Target Force is reached.')
+        self._param_row(adv, label='Descent Speed',
+                         unit='%', var=self.approach_var,
+                         vmin=APPROACH_MIN, vmax=APPROACH_MAX, step=1.0,
+                         hint='Real-robot (MovL) descent speed, as SpeedFactor '
+                              '%. The descent is one continuous move at this '
+                              'speed until the Target Force is reached. LOW '
+                              'values = slow descent and less overshoot at '
+                              'contact (the arm is fast even at low %). '
+                              'Start low (1–2 %) and raise if too slow.')
         self._param_row(adv, label='HOLD — Band Tolerance',
                          unit='N', var=self.hold_tol_var,
                          vmin=0.05, vmax=2.0, step=0.05,
@@ -2418,13 +2456,18 @@ class PalpationGUI(Node):
                               dtype=np.float64)
             q_dobot_deg = [math.degrees(float(v))
                            for v in _urdf_to_dobot(q_urdf)]
-            try:
-                speed_pct = int(max(SPEED_FACTOR_MIN,
-                                    min(SPEED_FACTOR_MAX,
-                                        self.speed_factor_var.get())))
-            except (ValueError, tk.TclError):
-                speed_pct = SPEED_FACTOR_DEFAULT
-            drv._send_dash(f'SpeedFactor({speed_pct})')
+            # set_speed=False: a descida em micro-passos MovJ já rebaixou o
+            # SpeedFactor uma vez (op 'speed') e NÃO quer que cada passo o
+            # resete ao slider — senão a descida correria na velocidade global.
+            # Home/jog (set_speed ausente) seguem usando o SpeedFactor do slider.
+            if item.get('set_speed', True):
+                try:
+                    speed_pct = int(max(SPEED_FACTOR_MIN,
+                                        min(SPEED_FACTOR_MAX,
+                                            self.speed_factor_var.get())))
+                except (ValueError, tk.TclError):
+                    speed_pct = SPEED_FACTOR_DEFAULT
+                drv._send_dash(f'SpeedFactor({speed_pct})')
             drv.mov_j_joint_deg(q_dobot_deg)
             self._last_robot_cmd_t = time.monotonic()
         elif op == 'rel':
@@ -2443,6 +2486,18 @@ class PalpationGUI(Node):
                 # Vertical puro: ΔZ é invariante entre mundo URDF e base
                 # DOBOT (robô montado na vertical) — dispensa calibração.
                 drv.rel_movl_user(0.0, 0.0, float(d[2]))
+            self._last_robot_cmd_t = time.monotonic()
+        elif op == 'speed':
+            # SpeedFactor global (%) sob demanda do explorer. Usado para
+            # rebaixar a velocidade só na descida MovL até o contato e
+            # restaurá-la ao tocar (ver tactile_explorer._movl_descend).
+            try:
+                pct = int(max(SPEED_FACTOR_MIN,
+                              min(SPEED_FACTOR_MAX,
+                                  int(item.get('pct', SPEED_FACTOR_DEFAULT)))))
+            except (ValueError, TypeError):
+                pct = SPEED_FACTOR_DEFAULT
+            drv._send_dash(f'SpeedFactor({pct})')
             self._last_robot_cmd_t = time.monotonic()
         elif op == 'calibrate_frame':
             self._movl_calibrate(drv)
@@ -4026,9 +4081,13 @@ class PalpationGUI(Node):
             self._esp32_dot_lbl.config(fg=WARN)
             self._esp32_status_lbl.config(text='WAITING', fg=WARN)
 
-        # Tensão
-        volt_txt   = f'{voltage:.6f}  V' if has_data else '—  V'
-        volt_color = TEXT if has_data else TEXT_DIM
+        # Tensão. Usa esp32_ok (pacote < 2 s), NÃO has_data: has_data fica True
+        # para sempre após o 1º pacote, então, se o stream da ESP parasse, o
+        # rótulo CONGELAVA no último valor e o parecia ao vivo (o "travado em
+        # 0.190" que não batia com a realidade). Agora apaga p/ '— V' no timeout,
+        # igual à Raw Voltage — dado velho não pode se passar por leitura viva.
+        volt_txt   = f'{voltage:.6f}  V' if esp32_ok else '—  V'
+        volt_color = TEXT if esp32_ok else TEXT_DIM
         self.lc_voltage_lbl.config(text=volt_txt, fg=volt_color)
         self.lc_volt_live_lbl.config(text=volt_txt, fg=volt_color)
 
@@ -4041,7 +4100,7 @@ class PalpationGUI(Node):
         # Força total calibrada (inclui preload estático).
         # Sinal invertido em relação à calibração (feita em tração):
         # compressão = positivo, tração = negativo.
-        if calibrated and has_data and abs(slope) > 1e-9:
+        if calibrated and esp32_ok and abs(slope) > 1e-9:
             force_total = (intercept - voltage) / slope
             self.lc_force_lbl.config(
                 text=f'{force_total:6.2f}  N',
@@ -4067,11 +4126,13 @@ class PalpationGUI(Node):
                 self.lc_tare_status_lbl.config(
                     text='Tare not done — click Tare Sensor before palpating',
                     fg=WARN)
-        elif calibrated and not has_data:
+        elif calibrated and not esp32_ok:
+            # Inclui tanto "nunca chegou dado" quanto "stream parou" (timeout):
+            # em ambos a força mostrada seria velha, então zera p/ '— N'.
             self.lc_force_lbl.config(text='—   N', fg=TEXT_DIM)
             self.lc_normal_force_lbl.config(text='—   N', fg=TEXT_DIM)
             self.lc_calib_status_lbl.config(
-                text='Calibrated — waiting for sensor data (check UDP)',
+                text='Calibrated — no fresh sensor data (check UDP / ESP32)',
                 fg=WARN)
         else:
             self.lc_force_lbl.config(text='—   N', fg=TEXT_DIM)

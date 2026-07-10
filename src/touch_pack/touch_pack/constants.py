@@ -69,17 +69,22 @@ LOAD_CELL_DISCOVERY_MAGIC = b'FRCV'         # tag do hello (ignora tráfego alhe
 
 # Transformação AFIM tensão_ADC→v_sensor aplicada no firmware da ESP32.
 # ESPELHO EXATO de sensors/ForceDriver/src/main.cpp:
-#     v_sensor = v_adc * V_GAIN - V_OFFSET,   V_GAIN = (R1+R2)/R2
-# com R1=220000, R2=98600 (divisor) e V_OFFSET=0.4544 V. O firmware NÃO
-# multiplica por AMP_GAIN — o ×10 que existia aqui era espúrio.
+#     v_sensor = v_adc * V_GAIN - V_OFFSET
+# V_GAIN = (R1+R2)/R2 com R1/R2 AFERIDOS pelo ADC (não pelo nominal): o divisor
+# nominal 221k/98.6k daria 3.2414, mas o ADC do ESP32 tem impedância de entrada
+# finita que carrega o divisor, então o R1 efetivo ≠ resistor físico. Aferido em
+# 2026-07-10 com 500 g: V_amp=0.345 V e v_adc reportado pelo ADC=0.2572 V →
+# V_GAIN=0.345/0.2572=1.341 (R2=98600, R1_efetivo=33650). Calibrar pelo pino com
+# multímetro (0.178 V) dava 1.9438 e jogava a GUI p/ ~0.5 V — errado, pois o
+# multímetro alta-Z não vê o carregamento. V_OFFSET foi zerado na troca p/ a
+# célula de 5 kg (a tare/calib da GUI cuida do zero).
 # Estes dois valores formam a ASSINATURA da configuração de hardware/firmware:
 # a GUI grava ambos no load_cell_calib.json ao calibrar e avisa quando a
 # calibração vigente foi feita com ganho/offset diferentes (firmware alterado
-# → slope/intercept salvos ficam inválidos silenciosamente).
-LC_FW_R1 = 220000.0
-LC_FW_R2 =  98600.0
-LC_FW_VOLTAGE_SCALE  = (LC_FW_R1 + LC_FW_R2) / LC_FW_R2   # ganho do divisor (≈3.23)
-LC_FW_VOLTAGE_OFFSET = 0.4544                             # V subtraído no firmware
+# → slope/intercept salvos ficam inválidos silenciosamente). MANTER SINCRONIZADO
+# com o V_GAIN/V_OFFSET do firmware — se um mudar, o outro TEM de mudar junto.
+LC_FW_VOLTAGE_SCALE  = 1.3413      # = V_GAIN do firmware ((33650+98600)/98600, aferido ADC)
+LC_FW_VOLTAGE_OFFSET = 0.190461    # = V_OFFSET do firmware (repouso da célula de 5 kg, deriva)
 
 # ── Touch sensor (STM32 → PC plotter → UDP) ──────────────────────────────────
 # Porta DIFERENTE da célula de carga: o force_receiver aceita qualquer

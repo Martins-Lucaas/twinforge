@@ -66,17 +66,47 @@ static uint32_t adc_count  = 0;
 // de 1 ms (ver loop()) — que é praticamente de graça e dá o dither sub-mV. O
 // force_receiver aplica mediana + EMA em software, onde é trivial reajustar.
 // ======================================================
-// DIVISOR DE TENSÃO + GANHO DO AMPLIFICADOR
+// RECONSTRUÇÃO DA SAÍDA DO AMPLIFICADOR (V_GAIN) — CALIBRADO POR MEDIÇÃO
 // ======================================================
-const float R1 = 221000.0f;
-const float R2 =  98600.0f;
-
-// Fator para reconstruir a saída do amplificador a partir da tensão lida no
-// pino. COM o divisor montado: V_GAIN = (R1+R2)/R2 ≈ 3.2. ATENÇÃO: o divisor
-// atenua o sinal ANTES do ADC, então joga resolução fora. Se você REMOVER o
-// divisor (saída do amp direto no GPIO34, desde que ≤ 3.3 V no fundo de
-// escala), troque V_GAIN para 1.0f — aí o ADC enxerga o sinal inteiro.
-const float V_GAIN = (R1 + R2) / R2;
+// O firmware lê a tensão no pino do ADC (v_adc, DEPOIS do divisor) e reconstrói
+// a saída do amplificador: v_sensor = v_adc * V_GAIN. É v_sensor que trafega na
+// rede e aparece como "LC Voltage" na GUI — logo v_sensor DEVE bater com o que
+// você mede com o multímetro na saída do amp.
+//
+// >>> O divisor É modelado por R1/R2, mas AFERIDO pelo ADC — não pelo nominal. <<<
+// V_GAIN = (R1+R2)/R2 reconstrói a saída do amp a partir do que o ADC lê.
+//
+// ARMADILHA (é o que gerou os ganhos errados anteriores): NÃO meça o pino do ADC
+// com multímetro para achar o ganho. O ADC do ESP32 tem impedância de entrada
+// FINITA, que entra em paralelo com R2 e carrega o divisor — a tensão que o
+// multímetro (alta-Z) lê no pino NÃO é a que o ADC converte. Ex.: multímetro no
+// pino deu 0.178 V, mas o ADC na prática reporta ~0.257 V. Calibrar pelo pino
+// (0.178) deu V_GAIN=1.9438 e a GUI foi para ~0.5 V; o certo é calibrar pelo
+// próprio ADC.
+//
+// Como reaferir (SÓ a razão R1/R2 importa — não dá p/ recuperar os dois físicos,
+// e o R1 aqui é EFETIVO, já embute o carregamento do ADC, ≠ resistor da placa):
+//   1) multímetro na SAÍDA do amp com um peso parado → V_amp   (ex.: 0.345 V)
+//   2) leia v_adc que o ADC reporta = (Raw Voltage da GUI) / (V_GAIN atual)
+//   3) V_GAIN_alvo = V_amp / v_adc  →  ajuste R1 até (R1+R2)/R2 = V_GAIN_alvo
+// Aferido 2026-07-10, 500 g: V_amp=0.345 V, v_adc=0.5/1.9438=0.2572 V →
+// V_GAIN=1.341. Com R2=98600 fixo, R1=33650 dá (33650+98600)/98600=1.3413 e a
+// GUI mostra 0.2572·1.3413 = 0.345 V, batendo com o amp.
+// Depois de mudar isto é OBRIGATÓRIO refazer a calibração na GUI (slope/intercept
+// dependem desta escala). Manter constants.py (LC_FW_VOLTAGE_SCALE) sincronizado.
+//
+// SEM_DIVISOR: a saída do amp em 0..2520 g é 0.076..2.034 V, que cabe INTEIRA nos
+// 0..3.3 V do ADC — o divisor é desnecessário e só joga resolução fora e injeta
+// ruído (~80 mV pp no pino). O IDEAL é remover o divisor (amp direto no GPIO34) e
+// pôr SEM_DIVISOR=1 → V_GAIN=1.0 e v_sensor = a própria saída do amp.
+#define SEM_DIVISOR 0
+#if SEM_DIVISOR
+const float V_GAIN = 1.0f;             // amp direto no GPIO34 (sem divisor)
+#else
+const float R1 = 33650.0f;             // EFETIVO (aferido p/ V_GAIN=1.341), ≠ nominal
+const float R2 = 98600.0f;             // resistor físico (perna baixa do divisor)
+const float V_GAIN = (R1 + R2) / R2;   // = 1.3413 (MEÇA V_amp/v_adc p/ reaferir)
+#endif
 
 // Offset DC do amplificador em repouso (sem carga). Com a célula MK CSA/ZL-100
 // a saída repousa em ~0.4544 V. Subtraímos para que a tensão enviada seja ~0
@@ -85,11 +115,13 @@ const float V_GAIN = (R1 + R2) / R2;
 // célula em repouso (porta 8080): ainda sobravam +0.001416 V → somado de novo
 // (0.45886 + 0.001416 = 0.460276), agora o repouso sai em 0. Se mudar de
 // célula/amp ou houver deriva térmica, reajuste (a GUI ainda faz tare por cima).
-// TEMPORARIAMENTE ZERADO (troca p/ célula de 5 kg): o offset antigo (0.460276)
-// era da MK CSA/ZL-100 e não vale mais. Com 0, o firmware manda a tensão do amp
-// "crua" (só amplificada/dividida, sem subtrair repouso) e a tare da GUI/calib
-// cuida do zero. Reaferir e repor o offset da célula nova quando recalibrar.
-const float V_OFFSET = 0.0f;
+// Aferido 2026-07-10 com a célula de 5 kg EM REPOUSO (sem carga): o v_sensor
+// repousava em ~0.190461 V. Subtraímos esse valor para o repouso sair em ~0.
+// ATENÇÃO: este offset DERIVA (já foi visto pular 0.077 → 0.190 entre sessões,
+// por temperatura/pré-carga da montagem) — se o repouso não sair em 0 depois de
+// regravar, reaferir aqui, OU simplesmente usar a tare da GUI, que zera por cima
+// sem reflashar. Manter constants.py (LC_FW_VOLTAGE_OFFSET) sincronizado.
+const float V_OFFSET = 0.190461f;
 
 // ======================================================
 // TEMPORIZAÇÃO — 1 kHz não-bloqueante + ENVIO EM LOTE
