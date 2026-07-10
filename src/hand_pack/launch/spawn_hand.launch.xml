@@ -1,5 +1,5 @@
 <launch>
-  <set_env name="GAZEBO_MODEL_PATH" value="/home/lucas-lpc/RoboticArm/src"/>
+  <set_env name="GAZEBO_MODEL_PATH" value="/home/lucas-lpc/twinforge/src"/>
 
   <arg name="world_file" default="$(find-pkg-share hand_pack)/worlds/base_hand.world"/>
 

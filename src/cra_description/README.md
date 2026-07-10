@@ -1,48 +1,53 @@
 # cra_description
 
-Pacote com o **URDF/Xacro e meshes do braço Dobot CR10** (modelo CR10A, 6-DOF). Extraído do repositório oficial Dobot [`DOBOT_6Axis_ROS2_V4`](https://github.com/Dobot-Arm/DOBOT_6Axis_ROS2_V4) — apenas este pacote é usado; os demais (cr3, cr5, cr7, MoveIt, nova2, etc.) podem ser descartados.
+Package holding the **URDF/Xacro and meshes of the Dobot CR10 arm** (CR10A model, 6-DOF). Extracted from the official Dobot repository [`DOBOT_6Axis_ROS2_V4`](https://github.com/Dobot-Arm/DOBOT_6Axis_ROS2_V4) — only this package is used; the others (cr3, cr5, cr7, MoveIt, nova2, etc.) can be discarded.
 
 <p align="center">
-  <img src="../../images/gazebo_arm_above_pick_station.png" width="60%" alt="Braço Dobot CR10 (URDF cra_description) posicionado sobre a estação de pick no Gazebo"/>
+  <img src="../../images/gazebo_arm_above_pick_station.png" width="60%" alt="Dobot CR10 arm (cra_description URDF) positioned above the pick station in Gazebo"/>
 </p>
-<p align="center"><em>URDF do <strong>Dobot CR10</strong> (6-DOF) carregado no Gazebo Classic a partir do <code>cr10_robot.xacro</code> deste pacote.</em></p>
+<p align="center"><em>URDF of the <strong>Dobot CR10</strong> (6-DOF) loaded into Gazebo Classic from this package's <code>cr10_robot.xacro</code>.</em></p>
+
+<p align="center">
+  <img src="../../images/physical_cr10_end_effector_joints.jpg" width="72%" alt="Close-up of the real CR10 wrist joints and tool flange, with an end effector bolted on and the emergency stop in the background"/>
+</p>
+<p align="center"><em>The real arm this URDF models: the CR10 wrist (joint4–joint6) and the tool flange the project's end effectors bolt onto.</em></p>
 
 ---
 
-## Conteúdo
+## Contents
 
 ```
 cra_description/
 ├── urdf/
-│   └── cr10_robot.xacro          URDF principal do CR10 (6 juntas + ros2_control)
+│   └── cr10_robot.xacro          Main CR10 URDF (6 joints + ros2_control)
 ├── meshes/
-│   └── *.stl / *.dae             Malhas visuais e de colisão de cada link
+│   └── *.stl / *.dae             Visual and collision meshes for each link
 └── package.xml
 ```
 
 ---
 
-## Como obter
+## How to obtain it
 
 ```bash
-cd ~/RoboticArm/src
+cd ~/twinforge/src
 git clone https://github.com/Dobot-Arm/DOBOT_6Axis_ROS2_V4.git
 
-# Manter só o cra_description
+# Keep only cra_description
 cd DOBOT_6Axis_ROS2_V4
 find . -mindepth 1 -maxdepth 1 ! -name 'cra_description' -exec rm -rf {} +
 
-# Ou mover diretamente para src/ e deletar o clone
-cd ~/RoboticArm/src
+# Or move it straight into src/ and delete the clone
+cd ~/twinforge/src
 mv DOBOT_6Axis_ROS2_V4/cra_description ./cra_description
 rm -rf DOBOT_6Axis_ROS2_V4
 ```
 
 ---
 
-## Uso no projeto
+## Use in the project
 
-O `cr10_robot.xacro` é processado em tempo de launch pelos pacotes `grasp_ml_pack` e `touch_pack`:
+`cr10_robot.xacro` is processed at launch time by the `grasp_ml_pack` and `touch_pack` packages:
 
 ```python
 import xacro
@@ -51,13 +56,13 @@ xacro.process_doc(doc)
 cr10_urdf = doc.toxml()
 ```
 
-O URDF resultante é injetado com o efector final (mão COVVI ou touch_tool) e publicado no `robot_state_publisher`. Nenhuma modificação é feita nos arquivos originais do pacote.
+The resulting URDF gets the end effector (COVVI hand or touch_tool) injected into it and is published to `robot_state_publisher`. No modifications are made to the package's original files.
 
 ---
 
-## Parâmetros cinemáticos (juntas em convenção URDF)
+## Kinematic parameters (joints in URDF convention)
 
-| Junta | xyz (m) | rpy (rad) |
+| Joint | xyz (m) | rpy (rad) |
 |---|---|---|
 | joint1 | `(0, 0, 0.1765)` | `(0, 0, 0)` |
 | joint2 | `(0, 0, 0)` | `(π/2, π/2, 0)` |
@@ -66,4 +71,4 @@ O URDF resultante é injetado com o efector final (mão COVVI ou touch_tool) e p
 | joint5 | `(0, -0.125, 0)` | `(π/2, 0, 0)` |
 | joint6 | `(0, 0.1084, 0)` | `(-π/2, 0, 0)` |
 
-A convenção de sinal das juntas no URDF é idêntica à do firmware Dobot TCP/IP V4 — offset `_URDF_DOBOT_OFFSET = np.zeros(6)` em `kinematics.py`.
+The joint sign convention in the URDF is identical to the Dobot TCP/IP V4 firmware — offset `_URDF_DOBOT_OFFSET = np.zeros(6)` in `kinematics.py`.

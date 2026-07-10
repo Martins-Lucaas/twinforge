@@ -1,300 +1,337 @@
 # touch_pack
 
-Plataforma de **palpação tátil** com o braço CR10 e a ferramenta de contato TouchTool Square 20×20 mm (acoplada à célula de carga) — ou o dedo Index da mão COVVI. Reproduz o protocolo de **Gupta et al. 2021** (aproximação até a força alvo, hold de força controlado, deslizamento Cartesiano e retração) em **simulação (SIM_ONLY)** ou em **espelho do robô real (MIRROR)**.
+**Tactile palpation** platform built on the CR10 arm and the TouchTool Square 20×20 mm contact tool (attached to the load cell) — or the Index finger of the COVVI hand. It reproduces the protocol of **Gupta et al. 2021** (approach to a target force, controlled force hold, Cartesian slide and retraction) either in **simulation (SIM_ONLY)** or **mirroring the real robot (MIRROR)**.
 
-Inclui ainda um **sensor de toque neuromórfico (STM32, matriz 4×4 + modelo de Izhikevich)**, gravação **sincronizada de força + toque**, e dois **modos de operação**: **Toque** (encosta com força controlada e volta) e **Deslizamento** (ciclo completo com arrasto lateral).
+It also includes a **neuromorphic touch sensor (STM32, 4×4 array + Izhikevich model)**, **synchronized force + touch recording**, and two **operating modes**: **Touch** (presses with controlled force and returns) and **Slide** (full cycle with a lateral drag).
 
 <p align="center">
-  <img src="../../images/touch_pack_gazebo_tactile_cell.png" width="48%" alt="Célula de palpação tátil no Gazebo — CR10 com ponta TouchTool sobre a mesa de palpação"/>
-  <img src="../../images/touch_pack_gui_palpation_slide.png" width="48%" alt="GUI de Palpação — aba Palpação no modo Deslizamento com painel da célula de carga ao vivo"/>
+  <img src="../../images/touch_pack_gazebo_tactile_cell.png" width="48%" alt="Tactile palpation cell in Gazebo — CR10 with the TouchTool tip above the palpation table"/>
+  <img src="../../images/touch_pack_gui_palpation_slide.png" width="48%" alt="Palpation GUI — Palpation tab in Slide mode with the live load-cell panel"/>
 </p>
-<p align="center"><em>Esquerda: cena de palpação no Gazebo Classic. Direita: GUI <code>palpation_gui</code> — aba <strong>Palpação</strong> (modo Deslizamento) com leitura ao vivo da célula de carga e do sensor de toque.</em></p>
+<p align="center"><em>Left: the palpation scene in Gazebo Classic. Right: the <code>palpation_gui</code> — <strong>Palpation</strong> tab (Slide mode) with live readings from the load cell and the touch sensor.</em></p>
+
+<p align="center">
+  <img src="../../images/physical_cr10_palpation_touch_tool.jpg" width="47%" alt="The real CR10 arm carrying the palpation tool, with the load cell and the red contact tip at the end"/>
+  <img src="../../images/physical_touch_tool_load_cell_5kg.jpg" width="47%" alt="Close-up of the palpation end effector: the 5 kg load cell bolted between two 3D-printed couplers, contact tip in red"/>
+</p>
+<p align="center"><em>The real end effector: the <strong>5 kg load cell</strong> is bolted between the lower and upper printed couplers, with the TouchTool tip at the end — the physical counterpart of the <code>touch_tool</code> URDF chain.</em></p>
+
+> The GUI is written in Portuguese. Where this README refers to on-screen labels, the original text is given in parentheses.
 
 ---
 
-## Modos de palpação
+## Palpation modes
 
-A GUI divide a palpação em dois modos (seletor na aba **Palpação**):
+The GUI splits palpation into two modes (selector in the **Palpation** (`Palpação`) tab):
 
-| Modo | Ciclo executado | Uso |
+| Mode | Cycle executed | Purpose |
 |---|---|---|
-| **Toque** | `HOME → DESCENDING → HOLD → RETRACT` (repetido **N toques**) | Encostar na mesa com força controlada e voltar à home — sem deslizar. Quantidade de toques selecionável. |
-| **Deslizamento** | `HOME → DESCENDING → HOLD → SLIDING → RETRACT` | Ciclo completo do protocolo Gupta, com arrasto lateral em ±X/±Y. |
+| **Touch** (`Toque`) | `HOME → DESCENDING → HOLD → RETRACT` (repeated **N touches**) | Press against the table with controlled force and return home — no sliding. The number of touches is selectable. |
+| **Slide** (`Deslizamento`) | `HOME → DESCENDING → HOLD → SLIDING → RETRACT` | The full Gupta protocol cycle, with a lateral drag along ±X/±Y. |
 
-Ambos os modos repetem o ciclo `repeats` vezes automaticamente (entre repetições o braço recua e refaz a home).
+Both modes repeat the cycle `repeats` times automatically (between repetitions the arm retracts and returns home).
 
 ---
 
-## Protocolo / FSM
+## Protocol / FSM
 
 ```
 IDLE → HOME → DESCENDING → HOLD → [SLIDING] → RETRACT → HOME → IDLE
 ```
 
-| Fase | Descrição |
+| Phase | Description |
 |---|---|
-| **HOME** | Trajetória batch no espaço de juntas (S-curve do JTC) a ≤ 0.3 rad/s até a pose inicial. Verifica se o TCP aponta para baixo. |
-| **DESCENDING** | Streaming Jacobiano ao longo do approach (−Z do TCP) com perfil fast→slow. **Controle por força:** termina quando a compressão atinge o *setpoint* (`force_n`). `depth_mm` é o curso **máximo de segurança**. |
-| **HOLD** | PID de força leva a compressão ao setpoint e **espera estabilizar**: `|Fz − alvo| ≤ tol` por `hold_stable_s` contínuos (teto `hold_timeout_s`). |
-| **SLIDING** | (só no modo Deslizamento) Streaming Jacobiano lateral em ±X/±Y a velocidade constante, com PID de força simultâneo no eixo normal e lock de orientação/profundidade. |
-| **RETRACT** | Recuo Cartesiano em +Z (oposto ao approach) por `retract_mm`. |
+| **HOME** | Batch joint-space trajectory (JTC S-curve) at ≤ 0.3 rad/s to the initial pose. Checks that the TCP points downward. |
+| **DESCENDING** | Jacobian streaming along the approach axis (TCP −Z) with a fast→slow profile. **Force controlled:** it ends when the compression reaches the *setpoint* (`force_n`). `depth_mm` is the **maximum safety** travel. |
+| **HOLD** | A force PID brings the compression to the setpoint and **waits for it to settle**: `\|Fz − target\| ≤ tol` for `hold_stable_s` continuous seconds (capped by `hold_timeout_s`). |
+| **SLIDING** | (Slide mode only) Lateral Jacobian streaming along ±X/±Y at constant velocity, with a simultaneous force PID on the normal axis and orientation/depth locking. |
+| **RETRACT** | Cartesian retreat along +Z (opposite the approach) by `retract_mm`. |
 
-Controle por **streaming direto** a 33 Hz — sem action server, sem fila de trajetórias. Cada setpoint é calculado e publicado individualmente, garantindo latência mínima e resposta imediata a `stop`/`pause`.
+Control runs through **direct streaming** at 33 Hz — no action server, no trajectory queue. Each setpoint is computed and published individually, which keeps latency minimal and makes `stop`/`pause` respond immediately.
 
-**Segurança de força:** convenção compressão = **positivo**, tração = negativo. A medição é **abortada** se a compressão exceder **15 N** (`FORCE_ABORT_LIMIT_N`); o setpoint do PID é saturado em **10 N**. Se a leitura da célula ficar velha (> 0.5 s), as fases de força abortam (`stale`).
+**Force safety:** by convention compression is **positive** and traction is negative. A measurement is **aborted** if the compression exceeds **15 N** (`FORCE_ABORT_LIMIT_N`); the PID setpoint is saturated at **10 N**. If the load-cell reading goes stale (> 0.5 s), the force phases abort (`stale`).
 
 ---
 
-## Nós
+## Nodes
 
-| Executável | Função |
+| Executable | Role |
 |---|---|
-| `tactile_explorer` | FSM da palpação: assina `/palpation/start`, executa o ciclo (modo Toque/Deslizamento), publica `/palpation/status` |
-| `palpation_gui` | GUI Tkinter: parâmetros, modos, controle manual, calibração da célula, poses/movimentos, dashboard do sensor de toque |
-| `palpation_logger` | Grava CSV + JSON por run em `sensors/Data/` |
-| `palpation_report` | Gera relatório estatístico por ciclo a partir dos CSVs de run |
-| `force_receiver` | Recebe UDP da ESP32 (porta **8080**) → `/load_cell/voltage`, `/load_cell/force`, `/load_cell/calibrated` |
-| `touch_receiver` | Recebe UDP do plotter do touch sensor (porta **8081**) → `/touch_sensor/value` |
-| `force_sync` | Pareia força × toque por chegada → `/touch_sync/data` (`SyncedTouch`) a 50 Hz |
-| `mirror_node` | Espelhamento sim → CR10 real **sem a GUI** (cobre `no_gui:=true` em MIRROR) |
-| `real_pose_sync` | Move o braço simulado até a pose do robô real ao iniciar (uso único no launch) |
+| `tactile_explorer` | Palpation FSM: subscribes to `/palpation/start`, runs the cycle (Touch/Slide mode), publishes `/palpation/status` |
+| `palpation_gui` | Tkinter GUI: parameters, modes, manual control, load-cell calibration, poses/motions, touch-sensor dashboard |
+| `palpation_logger` | Writes one CSV + JSON per run into `sensors/Data/` |
+| `palpation_report` | Generates a per-cycle statistical report from the run CSVs |
+| `force_receiver` | Receives UDP from the ESP32 (port **8080**) → `/load_cell/voltage`, `/load_cell/force`, `/load_cell/calibrated` |
+| `touch_receiver` | Receives UDP from the touch-sensor plotter (port **8081**) → `/touch_sensor/value` |
+| `force_sync` | Pairs force × touch by arrival → `/touch_sync/data` (`SyncedTouch`) at 50 Hz |
+| `mirror_node` | Mirrors sim → real CR10 **without the GUI** (covers `no_gui:=true` in MIRROR) |
+| `real_pose_sync` | Moves the simulated arm to the real robot's pose at startup (single use in the launch) |
 
 ---
 
-## Iniciar
+## How to run
 
 ```bash
 source install/setup.bash
 
-# Célula completa (Gazebo + CR10 + GUI + logger + force_rx + touch_rx)
+# Full cell (Gazebo + CR10 + GUI + logger + force_rx + touch_rx)
 ros2 launch touch_pack tactile_cell.launch.py
 
-# Ponta tátil + célula de carga (libera a aba Palpação) e espelho do robô real
+# Tactile tip + load cell (unlocks the Palpation tab) and mirroring of the real robot
 ros2 launch touch_pack tactile_cell.launch.py \
     end_effector:=touch_tool \
     control_mode:=mirror \
     robot_ip:=192.168.5.2
 
-# Headless (sem GUI Tkinter) — mirror_node assume o espelhamento
+# Headless (no Tkinter GUI) — mirror_node takes over the mirroring
 ros2 launch touch_pack tactile_cell.launch.py control_mode:=mirror no_gui:=true
 ```
 
-### Argumentos do launch
+<p align="center">
+  <img src="../../images/touch_pack_gazebo_touch_tool_closeup.png" width="66%" alt="Gazebo close-up of the CR10 carrying the touch tool above the palpation table in the research_lab world"/>
+</p>
+<p align="center"><em><code>end_effector:=touch_tool</code> in <code>worlds/research_lab.world</code> — the arm carries the contact tip instead of the COVVI hand, which is what unlocks the Palpation tab.</em></p>
 
-| Argumento | Default | Valores |
+### Launch arguments
+
+| Argument | Default | Values |
 |---|---|---|
-| `end_effector` | `hand` | `hand` (controle da mão COVVI) · `touch_tool` (ponta de palpação + célula de carga) |
+| `end_effector` | `hand` | `hand` (COVVI hand control) · `touch_tool` (palpation tip + load cell) |
 | `control_mode` | `sim_only` | `sim_only` · `mirror` · `real_from_sim` |
-| `robot_ip` | `192.168.5.2` | IP do controlador CR10 real |
-| `no_gui` | `false` | `true` = sem Tkinter (usa `mirror_node` em MIRROR) |
+| `robot_ip` | `192.168.5.2` | IP of the real CR10 controller |
+| `no_gui` | `false` | `true` = no Tkinter (uses `mirror_node` in MIRROR) |
 
-> A aba/modo **Palpação** só fica ativa com `end_effector:=touch_tool` (precisa da célula de carga). Em `hand` a GUI mostra o controle da mão.
+> The **Palpation** tab/mode is only active with `end_effector:=touch_tool` (it needs the load cell). With `hand` the GUI shows the hand controls instead.
 
 ---
 
 ## GUI (`palpation_gui`)
 
-Notebook com 5 abas: **Palpação · Controle Manual · Célula de Carga · Poses & Movimentos · Sensores**.
+A notebook with 5 tabs: **Palpation** (`Palpação`) · **Manual Control** (`Controle Manual`) · **Load Cell** (`Célula de Carga`) · **Poses & Motions** (`Poses & Movimentos`) · **Sensors** (`Sensores`).
 
-### Aba Palpação
-- **Seletor de modo**: Toque / Deslizamento (mostra/oculta os parâmetros de deslizamento).
-- **Força Alvo** (setpoint do PID, 1–10 N, inteiro) · **Repetições / Quantidade de Toques**.
-- **Deslizamento** (só nesse modo): Velocidade (mm/s), Distância (mm), Direção ±X/±Y.
-- **Avançados** (recolhível): Profundidade máx. de descida, PID Kp/Ki/Kd, Velocidade de aproximação, e estabilização do HOLD (tolerância da banda, janela estável, timeout).
-- Leitura da **célula de carga** ao vivo + sparkline da força.
-- Botões **Iniciar / Parar / ⏸ Pausar** e **Salvar dados (força+toque)**.
-- Parâmetros persistidos entre sessões (incl. o modo escolhido).
+### Palpation tab
+- **Mode selector**: Touch / Slide (shows or hides the slide parameters).
+- **Target force** (PID setpoint, 1–10 N, integer) · **Repetitions / Number of touches**.
+- **Slide** (that mode only): velocity (mm/s), distance (mm), direction ±X/±Y.
+- **Advanced** (collapsible): max descent depth, PID Kp/Ki/Kd, approach velocity, and HOLD settling (band tolerance, stable window, timeout).
+- Live **load-cell** reading + a force sparkline.
+- **Start / Stop / ⏸ Pause** buttons and **Save data (force+touch)**.
+- Parameters persist between sessions (including the selected mode).
 
-### Aba Controle Manual
-- 6 sliders do braço CR10 + (em modo `hand`) 6 da mão COVVI.
-- Presets Abrir / Apontar / Fechar · SpeedFactor (%) · duração de trajetória.
-- Botões Home e salvar Home customizada · mini-painel da célula de carga.
-
-<p align="center">
-  <img src="../../images/touch_pack_gui_manual_gazebo.png" width="92%" alt="Aba Controle Manual lado a lado com o Gazebo — sliders das juntas do CR10 e leitura da célula de carga"/>
-</p>
-<p align="center"><em>Aba <strong>Controle Manual</strong> ao lado do Gazebo: jog das 6 juntas do CR10 com a célula de carga lida ao vivo (jog em <code>MovJ</code> quando em MIRROR).</em></p>
-
-### Aba Célula de Carga
-- **Leitura**: força/tensão ao vivo + tara.
-- **Calibração**: wizard que coleta pares (massa kg, tensão V) e faz regressão linear (slope/intercept).
-
-### Aba Poses & Movimentos
-- **Capturar pose** do robô real (feedback port) ou do Gazebo (`/joint_states`).
-- **Drag Teach**: libera o braço real (`DragTeachSwitch`); o Gazebo espelha o movimento manual a 33 Hz; detecção automática de drag por movimento de juntas.
-- **Movimentos**: sequências de N poses + velocidade → interpola no Gazebo e `MovJ` cadenciado no real (MIRROR).
-- Persistência em `~/.config/touch_pack/poses.json`.
-
-### Aba Sensores
-Dashboard do **sensor de toque (STM32, Izhikevich)** com 4 gráficos embutidos via matplotlib:
-**Heatmap de tensão (4×4)** · **Raster RA/SA** (janela deslizante de 5 s) · **I_final** · **Neurônio pós**, ao lado da leitura ao vivo da célula de carga.
-Renderização com **blit** (`FuncAnimation` @ 20 Hz) — desenha só os artistas que mudam, e pausa quando a aba não está visível (sem travamento, raster desliza suave).
+### Manual Control tab
+- 6 CR10 arm sliders + (in `hand` mode) 6 COVVI hand sliders.
+- Open / Point / Close presets · SpeedFactor (%) · trajectory duration.
+- Home button and custom-Home saving · load-cell mini panel.
 
 <p align="center">
-  <img src="../../images/touch_pack_gui_sensors_izhikevich.png" width="92%" alt="Aba Sensores — heatmap 4×4, raster RA/SA, I_final e neurônio pós do modelo de Izhikevich"/>
+  <img src="../../images/touch_pack_gui_manual_gazebo.png" width="92%" alt="Manual Control tab side by side with Gazebo — CR10 joint sliders and load-cell reading"/>
 </p>
-<p align="center"><em>Aba <strong>Sensores</strong>: heatmap de tensão 4×4, raster RA/SA, corrente <code>I_final</code> e resposta do neurônio pós-sináptico (Izhikevich), lidos do STM32 por USB-CDC.</em></p>
+<p align="center"><em><strong>Manual Control</strong> tab next to Gazebo: jogging the 6 CR10 joints with the load cell read live (jog uses <code>MovJ</code> when in MIRROR).</em></p>
+
+### Load Cell tab
+- **Reading**: live force/voltage + tare.
+- **Calibration**: a wizard that collects (mass kg, voltage V) pairs and runs a linear regression (slope/intercept).
+
+### Poses & Motions tab
+- **Capture a pose** from the real robot (feedback port) or from Gazebo (`/joint_states`).
+- **Drag Teach**: releases the real arm (`DragTeachSwitch`); Gazebo mirrors the manual motion at 33 Hz; drag is detected automatically from joint movement.
+- **Motions**: sequences of N poses + a velocity → interpolated in Gazebo and paced as `MovJ` on the real arm (MIRROR).
+- Persisted in `~/.config/touch_pack/poses.json`.
+
+### Sensors tab
+A dashboard for the **touch sensor (STM32, Izhikevich)** with 4 embedded matplotlib plots:
+**voltage heatmap (4×4)** · **RA/SA raster** (5 s sliding window) · **I_final** · **postsynaptic neuron**, alongside the live load-cell reading.
+Rendered with **blitting** (`FuncAnimation` @ 20 Hz) — only the artists that change are redrawn, and it pauses when the tab is not visible (no freezing, the raster scrolls smoothly).
+
+<p align="center">
+  <img src="../../images/touch_pack_gui_sensors_izhikevich.png" width="92%" alt="Sensors tab — 4×4 heatmap, RA/SA raster, I_final and postsynaptic neuron of the Izhikevich model"/>
+</p>
+<p align="center"><em><strong>Sensors</strong> tab: 4×4 voltage heatmap, RA/SA raster, <code>I_final</code> current and the postsynaptic neuron response (Izhikevich), read from the STM32 over USB-CDC.</em></p>
 
 ### Header
-- IP da mão e do braço CR10 + Conectar/Desconectar · dropdown SIM_ONLY ↔ MIRROR · ECI ON/OFF · PWR ON/OFF · E-STOP.
+- Hand and CR10 arm IPs + Connect/Disconnect · SIM_ONLY ↔ MIRROR dropdown · ECI ON/OFF · PWR ON/OFF · E-STOP.
 
 ---
 
-## Sensor de toque (STM32)
+## Touch sensor (STM32)
 
-Matriz de **4×4 taxels** lida por USB-CDC (115200 baud, auto-detecção da porta ACM/USB). O firmware emite tensões, *spikes* RA/SA (modelo neuromórfico) e a corrente final `I_final` do neurônio pós-sináptico (modelo de **Izhikevich**).
+A **4×4 taxel** array read over USB-CDC (115200 baud, ACM/USB port auto-detection). The firmware emits voltages, RA/SA *spikes* (neuromorphic model) and the final current `I_final` of the postsynaptic neuron (**Izhikevich** model).
 
-- `touch_source.py` (`TouchSensorSource`) lê a serial direto no PC da GUI e alimenta a aba **Sensores**; publica `/touch_sensor/value` (throttle de 100 Hz).
-- Sem serial local, `touch_receiver` recebe a leitura retransmitida por UDP (porta **8081**) e publica o mesmo `/touch_sensor/value` — a GUI cai automaticamente para esse modo.
-
----
-
-## Sincronização força × toque
-
-`force_sync` pareia a última amostra fresca de `/load_cell/force` com a de `/touch_sensor/value` e publica `touch_pack_msgs/SyncedTouch` em `/touch_sync/data` a **50 Hz** (mesma taxa da célula). Cada par carrega `load_cell_age_ms` / `touch_age_ms` para avaliar a qualidade da sincronização *a posteriori*.
+- `touch_source.py` (`TouchSensorSource`) reads the serial port directly on the GUI's PC and feeds the **Sensors** tab; it publishes `/touch_sensor/value` (throttled to 100 Hz).
+- Without a local serial port, `touch_receiver` receives the reading relayed over UDP (port **8081**) and publishes the same `/touch_sensor/value` — the GUI falls back to that mode automatically.
 
 ---
 
-## Onde os dados são salvos
+## Force × touch synchronization
 
-Tudo vai para **`<raiz_do_repo>/sensors/Data/`** (override: variável de ambiente `TOUCH_PACK_DATA_DIR`). O diretório é localizado automaticamente subindo a partir do pacote até achar `sensors/` — funciona tanto rodando do `src/` quanto do `install/`.
+`force_sync` pairs the latest fresh sample of `/load_cell/force` with the latest of `/touch_sensor/value` and publishes `touch_pack_msgs/SyncedTouch` on `/touch_sync/data` at **50 Hz** (the load cell's own rate). Each pair carries `load_cell_age_ms` / `touch_age_ms` so the synchronization quality can be assessed *a posteriori*.
 
-| Arquivo | Origem | Conteúdo |
+---
+
+## Where the data is saved
+
+Everything goes to **`<repo_root>/sensors/Data/`** (override with the `TOUCH_PACK_DATA_DIR` environment variable). The directory is located automatically by walking up from the package until `sensors/` is found — this works both when running from `src/` and from `install/`.
+
+| File | Source | Contents |
 |---|---|---|
-| `<ts>__samples.csv` | `palpation_logger` | `t_rel_s, cycle, phase, force_net_n, q1..q6, tcp_x/y/z, touch_value, touch_age_ms` — uma linha por amostra |
-| `<ts>__params.json` | `palpation_logger` | parâmetros do `/palpation/start` (lido pelo `palpation_report`) |
-| `<ts>__sensors.csv` | botão **Salvar dados (força+toque)** da GUI | snapshot a 50 Hz: força líquida, LC bruto, tensão LC, `touch_i_final` e as **16 tensões** dos taxels (`v00..v33`) |
+| `<ts>__samples.csv` | `palpation_logger` | `t_rel_s, cycle, phase, force_net_n, q1..q6, tcp_x/y/z, touch_value, touch_age_ms` — one row per sample |
+| `<ts>__params.json` | `palpation_logger` | parameters from `/palpation/start` (read by `palpation_report`) |
+| `<ts>__sensors.csv` | the GUI's **Save data (force+touch)** button | 50 Hz snapshot: net force, raw LC, LC voltage, `touch_i_final` and the **16 taxel voltages** (`v00..v33`) |
 
-- O run fecha automaticamente em `DONE`/`ABORTED`; watchdog fecha se parar de receber amostras.
-- Flush periódico — não perde dados se o nó morrer.
+- The run closes automatically on `DONE`/`ABORTED`; a watchdog closes it if samples stop arriving.
+- Periodic flushing — no data is lost if the node dies.
 
 ---
 
-## Interfaces ROS (`touch_pack_msgs`)
+## ROS interfaces (`touch_pack_msgs`)
 
 ### `/palpation/start` — `touch_pack_msgs/PalpationStart`
-Mensagem **tipada** (substitui o antigo JSON em `std_msgs/String`):
+A **typed** message (it replaces the old JSON inside `std_msgs/String`):
 
-| Campo | Significado |
+| Field | Meaning |
 |---|---|
-| `mode` | `'TOUCH'` (toque) · `'SLIDE'` (deslizamento) · vazio = SLIDE |
-| `force_n` | setpoint do PID de força (N, compressão) |
-| `depth_mm` | curso máximo de descida — segurança |
-| `speed_mms` · `slide_dist_mm` · `slide_dir` | parâmetros do deslizamento (`+X`/`-X`/`+Y`/`-Y`) |
-| `kp` · `ki` · `kd` | ganhos do PID de força ((m/s)/N) |
-| `approach_speed_mms` | velocidade da descida/recuo |
-| `repeats` | nº de ciclos / toques (≥ 1) |
-| `speed_factor_pct` | SpeedFactor do braço real (%) |
-| `home_deg[6]` | home do braço (graus, joint1..joint6) |
-| `hold_tol_n` · `hold_stable_s` · `hold_timeout_s` | estabilização do HOLD (0 = default) |
+| `mode` | `'TOUCH'` (touch) · `'SLIDE'` (slide) · empty = SLIDE |
+| `force_n` | force PID setpoint (N, compression) |
+| `depth_mm` | maximum descent travel — safety |
+| `speed_mms` · `slide_dist_mm` · `slide_dir` | slide parameters (`+X`/`-X`/`+Y`/`-Y`) |
+| `kp` · `ki` · `kd` | force PID gains ((m/s)/N) |
+| `approach_speed_mms` | descent/retreat velocity |
+| `repeats` | number of cycles / touches (≥ 1) |
+| `speed_factor_pct` | real arm SpeedFactor (%) |
+| `home_deg[6]` | arm home (degrees, joint1..joint6) |
+| `hold_tol_n` · `hold_stable_s` · `hold_timeout_s` | HOLD settling (0 = default) |
 
 ### `/palpation/status` — `touch_pack_msgs/PalpationStatus`
 `phase`, `cycle`, `cycles_total`, `target_depth_mm`, `target_force_n`, `force_net_n`, `speed_mms`, `paused`.
 
-### Outros tópicos
-| Tópico | Tipo | Descrição |
+### Other topics
+| Topic | Type | Description |
 |---|---|---|
-| `/palpation/stop` | `std_msgs/String` | para o experimento |
-| `/palpation/pause` | `std_msgs/Bool` | pausa (segura a posição) / retoma |
-| `/load_cell/voltage` | `std_msgs/Float32` | tensão bruta da célula (V) |
-| `/load_cell/force` | `std_msgs/Float32` | força calibrada (N, compressão +) |
-| `/load_cell/force_net` | `std_msgs/Float32` | força **tare-compensada** (publicada pela GUI; consumida pelo explorer/logger) |
-| `/load_cell/calibrated` | `std_msgs/Bool` | calibração carregada |
-| `/touch_sensor/value` | `std_msgs/Float32` | leitura do touch sensor |
-| `/touch_sync/data` | `touch_pack_msgs/SyncedTouch` | par força × toque sincronizado (50 Hz) |
+| `/palpation/stop` | `std_msgs/String` | stops the experiment |
+| `/palpation/pause` | `std_msgs/Bool` | pauses (holds position) / resumes |
+| `/load_cell/voltage` | `std_msgs/Float32` | raw load-cell voltage (V) |
+| `/load_cell/force` | `std_msgs/Float32` | calibrated force (N, compression +) |
+| `/load_cell/force_net` | `std_msgs/Float32` | **tare-compensated** force (published by the GUI; consumed by the explorer/logger) |
+| `/load_cell/calibrated` | `std_msgs/Bool` | calibration loaded |
+| `/touch_sensor/value` | `std_msgs/Float32` | touch-sensor reading |
+| `/touch_sync/data` | `touch_pack_msgs/SyncedTouch` | synchronized force × touch pair (50 Hz) |
 
 ---
 
-## Disparar palpação via terminal
+## Triggering palpation from the terminal
 
 ```bash
-# Modo Toque — 3 toques a 2 N
+# Touch mode — 3 touches at 2 N
 ros2 topic pub --once /palpation/start touch_pack_msgs/msg/PalpationStart \
   "{mode: 'TOUCH', force_n: 2.0, depth_mm: 30.0, repeats: 3,
     approach_speed_mms: 50.0, speed_factor_pct: 10.0,
     kp: 0.001, ki: 0.0005, kd: 0.0}"
 
-# Modo Deslizamento — 50 mm em +Y a 10 mm/s
+# Slide mode — 50 mm along +Y at 10 mm/s
 ros2 topic pub --once /palpation/start touch_pack_msgs/msg/PalpationStart \
   "{mode: 'SLIDE', force_n: 2.0, depth_mm: 30.0, speed_mms: 10.0,
     slide_dist_mm: 50.0, slide_dir: '+Y', repeats: 1,
     approach_speed_mms: 50.0, speed_factor_pct: 10.0,
     kp: 0.001, ki: 0.0005, kd: 0.0}"
 
-# Monitorar a FSM
+# Monitor the FSM
 ros2 topic echo /palpation/status
 
-# Parar / pausar
+# Stop / pause
 ros2 topic pub --once /palpation/stop  std_msgs/msg/String "data: 'stop'"
 ros2 topic pub --once /palpation/pause std_msgs/msg/Bool   "data: true"
 ```
 
-Fases da FSM: `IDLE · HOME · DESCENDING · HOLD · SLIDING · RETRACT · DONE · ABORTED`
+FSM phases: `IDLE · HOME · DESCENDING · HOLD · SLIDING · RETRACT · DONE · ABORTED`
 
 ---
 
-## Cinemática (`kinematics.py`)
+## Kinematics (`kinematics.py`)
 
-FK e Jacobiano para o efetuador selecionado:
+FK and Jacobian for the selected end effector:
 
 ```python
-T_TOUCH_TOOL_ATTACH  # TCP da ponta tátil — +188.5 mm em Z do Link6 (tcp_link)
-T_HAND_ATTACH        # attach da mão COVVI (acoplador da prótese)
+T_TOUCH_TOOL_ATTACH  # tactile tip TCP — +188.5 mm in Z from Link6 (tcp_link)
+T_HAND_ATTACH        # COVVI hand attachment (prosthesis coupler)
 ```
 
-Cadeia URDF do touch_tool (acopladores encaixados na célula de carga):
+URDF chain of the touch_tool (couplers fitted onto the load cell):
 ```
 Link6 → lower_coupling → force_sensor (+7mm) → upper_coupling (+59mm)
       → touch_tool (+74mm) → tcp_link (+188.5mm)
 ```
 
-Convenção braço real ↔ URDF: offsets de junta tratados em `kinematics.py` (joints 2 e 4 têm offset vs. DH); `_HOME_Q` e `JOINT_MIN/MAX` também em convenção URDF.
+Real arm ↔ URDF convention: joint offsets are handled in `kinematics.py` (joints 2 and 4 have an offset relative to DH); `_HOME_Q` and `JOINT_MIN/MAX` are also in the URDF convention.
 
 ---
 
-## Modo MIRROR — espelho do robô real
+## MIRROR mode — mirroring the real robot
 
-Em MIRROR, os comandos publicados em `/cr10_group_controller/joint_trajectory` chegam ao CR10 real:
+In MIRROR, the commands published on `/cr10_group_controller/joint_trajectory` reach the real CR10:
 
-- **Palpação ativa**: `ServoJ` a 33 Hz com a posição de `/joint_states` (latência mínima p/ controle de força).
-- **Jog manual (IDLE)**: `MovJ` com debounce de 80 ms a partir do último ponto publicado.
-- **Drag Teach**: poll a 33 Hz lê o real e publica no Gazebo (mirror do movimento manual).
-- **Sem GUI** (`no_gui:=true`): o `mirror_node` reproduz o núcleo desse comportamento.
+- **Palpation running**: `ServoJ` at 33 Hz with the position from `/joint_states` (minimal latency for force control).
+- **Manual jog (IDLE)**: `MovJ` with an 80 ms debounce from the last published point.
+- **Drag Teach**: polls the real arm at 33 Hz and publishes into Gazebo (mirrors the manual motion).
+- **No GUI** (`no_gui:=true`): `mirror_node` reproduces the core of that behavior.
 
-Velocidade do braço real por `SpeedFactor(%)` — sincronizado com o slider da GUI (forçado a 10 % durante a palpação por segurança).
+The real arm's velocity is set by `SpeedFactor(%)` — synchronized with the GUI slider (forced to 10 % during palpation for safety).
+
+<p align="center">
+  <img src="../../images/fig_modos_sim_real.svg" width="88%" alt="Diagram of the two directions of the bridge: Sim-to-Real where the simulator commands, and Real-to-Sim where the hardware commands"/>
+</p>
+<p align="center"><em>Only one direction is active at a time, selected by mode. <strong>Sim-to-Real</strong>: the same goal moves the virtual model and the real equipment at once. <strong>Real-to-Sim</strong>: the hardware has authority, which is what makes drag teach possible (controller in REMOTE mode). Diagram labels are in Portuguese.</em></p>
+
+### Startup synchronization (`real_pose_sync`)
+
+<p align="center">
+  <img src="../../images/fig_estado_inicial.svg" width="88%" alt="Flow diagram: at startup the system reads the real arm pose over TCP/IP and drives Gazebo to it in about 3 seconds, or keeps the default URDF pose if the robot is unreachable"/>
+</p>
+<p align="center"><em>The twin is born synchronized: at launch the real CR10 pose is read over TCP/IP (read-only) and Gazebo is driven to it (~3 s). If the robot is off or unreachable, the default URDF pose is kept and the system still comes up.</em></p>
+
+<p align="center">
+  <img src="../../images/physical_initial_state_sync_gazebo.jpg" width="72%" alt="The real CR10 with the touch tool beside a monitor showing Gazebo with the simulated arm in the same pose"/>
+</p>
+<p align="center"><em>The same initial state on both sides — real arm and Gazebo — right after startup synchronization.</em></p>
+
+### Measuring the mirroring latency
+
+<p align="center">
+  <img src="../../images/fig_latencia_metodo.svg" width="88%" alt="Diagram of the latency measurement: the simulated and physical joint-angle series are resampled on a common clock and cross-correlated; the correlation peak gives the time shift"/>
+</p>
+<p align="center"><em>Latency is measured by cross-correlating the simulated joint series with the physical one (125 Hz) on a common <code>time.monotonic</code> clock. The peak gives Δt; the sign of the lag tells which side leads — sim ahead (Sim→Real) or real ahead (Real→Sim). See <code>latency_probe.py</code>. Diagram labels are in Portuguese.</em></p>
 
 ---
 
-## Célula de carga (ESP32)
+## Load cell (ESP32)
 
-`force_receiver` abre UDP na porta **8080** e aguarda broadcasts da ESP32.
+`force_receiver` opens UDP on port **8080** and waits for broadcasts from the ESP32.
 
-**Payload** (little-endian, 8 bytes): `float v_sensor; float force_filtered;` (o segundo é ignorado — a força é recalculada com a calibração do PC).
+**Payload** (little-endian, 8 bytes): `float v_sensor; float force_filtered;` (the second one is ignored — the force is recomputed with the PC's calibration).
 
-A calibração é lida de `~/.config/touch_pack/load_cell_calib.json` e recarregada periodicamente; é gerada pelo wizard da aba Célula de Carga.
+The calibration is read from `~/.config/touch_pack/load_cell_calib.json` and reloaded periodically; it is produced by the wizard in the Load Cell tab.
 
 ---
 
-## Arquivos persistentes
+## Persistent files
 
-| Caminho | Conteúdo |
+| Path | Contents |
 |---|---|
-| `~/.config/touch_pack/robot.json` | IPs (mão/braço) + último modo (SIM_ONLY/MIRROR) |
-| `~/.config/touch_pack/home_pose.json` | home customizada do braço |
-| `~/.config/touch_pack/load_cell_calib.json` | slope/intercept da calibração |
-| `~/.config/touch_pack/palpation_params.json` | últimos parâmetros da palpação (inclui o modo) |
-| `~/.config/touch_pack/poses.json` | poses e movimentos gravados |
-| `<repo>/sensors/Data/` | dados de palpação e do stream força+toque |
+| `~/.config/touch_pack/robot.json` | IPs (hand/arm) + last mode (SIM_ONLY/MIRROR) |
+| `~/.config/touch_pack/home_pose.json` | custom arm home |
+| `~/.config/touch_pack/load_cell_calib.json` | calibration slope/intercept |
+| `~/.config/touch_pack/palpation_params.json` | last palpation parameters (including the mode) |
+| `~/.config/touch_pack/poses.json` | recorded poses and motions |
+| `<repo>/sensors/Data/` | palpation data and the force+touch stream |
 
 ---
 
-## Dependências
+## Dependencies
 
 ```bash
 sudo apt install ros-humble-admittance-controller \
                  ros-humble-kinematics-interface-kdl \
                  ros-humble-force-torque-sensor-broadcaster
-pip install "numpy<2" matplotlib pyserial   # matplotlib/pyserial: aba Sensores (opcionais)
+pip install "numpy<2" matplotlib pyserial   # matplotlib/pyserial: Sensors tab (optional)
 ```
 
-> Sem `matplotlib`/`pyserial` a GUI segue funcionando em modo degradado (a aba Sensores fica desabilitada; o resto da palpação é normal).
+> Without `matplotlib`/`pyserial` the GUI still works in a degraded mode (the Sensors tab is disabled; the rest of the palpation works normally).

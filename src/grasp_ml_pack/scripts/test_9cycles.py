@@ -15,7 +15,7 @@ Uso:
     # Terminal 1
     ros2 launch grasp_ml_pack conveyor_cell.launch.py no_gui:=true
     # Terminal 2
-    cd /home/lucas-lpc/RoboticArm && source install/setup.bash
+    cd /home/lucas-lpc/twinforge && source install/setup.bash
     python3 src/grasp_ml_pack/scripts/test_9cycles.py
 """
 

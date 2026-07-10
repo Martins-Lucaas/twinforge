@@ -12,7 +12,7 @@ A descida extra é aplicada como um ajuste linear empírico em joint2/3
 (equivalente ao `_adjusted_pick_pose` da GUI).
 
 Uso:
-    cd /home/lucas-lpc/RoboticArm
+    cd /home/lucas-lpc/twinforge
     source install/setup.bash
     python3 src/grasp_ml_pack/scripts/tune_descent.py
 """

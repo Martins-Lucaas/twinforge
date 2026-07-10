@@ -1,126 +1,144 @@
 # hand_pack
 
-Pacote de suporte da mão **COVVI Hand** — contém o URDF combinado CR10 + COVVI, helpers de launch, funções de pós-processamento do URDF e GUIs auxiliares para controle isolado da mão.
+Support package for the **COVVI Hand** — it holds the combined CR10 + COVVI URDF, launch helpers, URDF post-processing functions and auxiliary GUIs for controlling the hand in isolation.
 
 <p align="center">
-  <img src="../../images/covvi_hand_rviz_joints_open.png" width="32%" alt="Mão COVVI no RViz — dedos abertos"/>
-  <img src="../../images/covvi_hand_rviz_joints_closed.png" width="32%" alt="Mão COVVI no RViz — dedos fechados"/>
-  <img src="../../images/gui_hand_tab_with_rviz.png" width="32%" alt="GUI de controle da mão COVVI ao lado do RViz"/>
+  <img src="../../images/covvi_hand_rviz_joints_open.png" width="32%" alt="COVVI hand in RViz — fingers open"/>
+  <img src="../../images/covvi_hand_rviz_joints_closed.png" width="32%" alt="COVVI hand in RViz — fingers closed"/>
+  <img src="../../images/gui_hand_tab_with_rviz.png" width="32%" alt="COVVI hand control GUI next to RViz"/>
 </p>
-<p align="center"><em>URDF combinado CR10 + COVVI (31 juntas: 6 primárias + 25 <em>mimic</em>) no RViz — dedos abertos e fechados — e a GUI de controle da mão.</em></p>
+<p align="center"><em>Combined CR10 + COVVI URDF (31 joints: 6 primary + 25 <em>mimic</em>) in RViz — fingers open and closed — and the hand control GUI.</em></p>
+
+<p align="center">
+  <img src="../../images/covvi_hand_product_photo.jpg" width="38%" alt="Product photo of the COVVI Hand prosthetic hand"/>
+  <img src="../../images/covvi_hand_3d_design_internal.png" width="55%" alt="RViz view of the hand mesh with the internal finger linkages and actuators visible"/>
+</p>
+<p align="center"><em>The real <strong>COVVI Hand</strong> (left) and the URDF visual mesh in RViz (right), which carries the internal finger linkage geometry the mimic joints reproduce.</em></p>
 
 ---
 
-## Conteúdo
+## Contents
 
 ```
 hand_pack/
 ├── urdf/
-│   └── linear_covvi_hand_gazebo.urdf   URDF completo da mão COVVI (31 juntas: 6 primárias + 25 mimic)
+│   └── linear_covvi_hand_gazebo.urdf   Full COVVI hand URDF (31 joints: 6 primary + 25 mimic)
 ├── config/
-│   └── cr10_covvi_controllers.yaml     ros2_control para o modo hand: JTC braço + JTC mão
+│   └── cr10_covvi_controllers.yaml     ros2_control for hand mode: arm JTC + hand JTC
 ├── launch/
-│   ├── cr10_covvi_gazebo.launch.py     CR10 + COVVI completo no Gazebo
-│   ├── cr10_covvi_rviz.launch.py       CR10 + COVVI no RViz (só visualização)
-│   ├── hand_gazebo.launch.py           Só a mão COVVI no Gazebo
-│   ├── display.launch.py               URDF display com joint_state_publisher_gui
-│   └── spawn_hand.launch.xml           Spawn da mão num Gazebo já rodando
+│   ├── cr10_covvi_gazebo.launch.py     Full CR10 + COVVI in Gazebo
+│   ├── cr10_covvi_rviz.launch.py       CR10 + COVVI in RViz (visualization only)
+│   ├── hand_gazebo.launch.py           COVVI hand alone in Gazebo
+│   ├── display.launch.py               URDF display with joint_state_publisher_gui
+│   └── spawn_hand.launch.xml           Spawn the hand into an already running Gazebo
 ├── hand_pack/
-│   ├── urdf_helpers.py                 Funções de pós-processamento do URDF (limites, skin, colisão)
+│   ├── urdf_helpers.py                 URDF post-processing functions (limits, skin, collision)
 │   └── ...
-└── meshes/                             STLs e malhas da mão COVVI
+└── meshes/                             COVVI hand STLs and meshes
 ```
 
 ---
 
-## Aplicação
+## Role
 
-O `hand_pack` não é um nó de runtime — é uma **biblioteca de recursos** usada pelos outros pacotes:
+`hand_pack` is not a runtime node — it is a **resource library** used by the other packages:
 
-- `grasp_ml_pack` e `touch_pack` importam `urdf_helpers.py` no launch para pós-processar o URDF combinado.
-- Os launches do `hand_pack` são usados para desenvolvimento e visualização isolada.
-- `cr10_covvi_controllers.yaml` define os dois JTCs (braço + mão) e é referenciado pelo launch do `grasp_ml_pack`.
+- `grasp_ml_pack` and `touch_pack` import `urdf_helpers.py` at launch time to post-process the combined URDF.
+- The `hand_pack` launches are used for development and standalone visualization.
+- `cr10_covvi_controllers.yaml` defines the two JTCs (arm + hand) and is referenced by the `grasp_ml_pack` launch.
 
 ---
 
-## Launches
+## How to run
+
+### Launches
 
 ```bash
-# CR10 + COVVI completo no Gazebo (mesma stack do grasp_ml_pack, sem esteira/câmera)
+# Full CR10 + COVVI in Gazebo (same stack as grasp_ml_pack, without conveyor/camera)
 ros2 launch hand_pack cr10_covvi_gazebo.launch.py
 
-# CR10 + COVVI no RViz — só visualização, sem simulação física
+# CR10 + COVVI in RViz — visualization only, no physics simulation
 ros2 launch hand_pack cr10_covvi_rviz.launch.py
 
-# Só a mão COVVI no Gazebo (sem braço)
+# COVVI hand alone in Gazebo (no arm)
 ros2 launch hand_pack hand_gazebo.launch.py
 
-# URDF viewer com sliders de juntas (desenvolvimento)
+# URDF viewer with joint sliders (development)
 ros2 launch hand_pack display.launch.py
 
-# Spawn da mão num Gazebo já rodando
+# Spawn the hand into an already running Gazebo
 ros2 launch hand_pack spawn_hand.launch.xml
 ```
 
----
+<p align="center">
+  <img src="../../images/covvi_hand_rviz_collision_mesh.png" width="47%" alt="RViz showing the combined CR10 + COVVI model driven by the joint_state_publisher_gui sliders"/>
+  <img src="../../images/covvi_hand_blender_collision_scene.png" width="47%" alt="Gazebo factory.world with the CR10 and the COVVI hand above crates and a cylinder"/>
+</p>
+<p align="center"><em>Left: <code>cr10_covvi_rviz.launch.py</code> — the combined model driven straight from <code>joint_state_publisher_gui</code>. Right: <code>hand_gazebo.launch.py</code> in <code>worlds/factory.world</code>.</em></p>
 
-## Executáveis
+### Executables
 
 ```bash
-# GUI standalone da mão — 6 sliders (Thumb/Index/Middle/Ring/Little/Rotate)
+# Standalone hand GUI — 6 sliders (Thumb/Index/Middle/Ring/Little/Rotate)
 ros2 run hand_pack hand_gui
 
-# GUI combinada — 6 juntas do CR10 + 6 digits COVVI
+# Combined GUI — 6 CR10 joints + 6 COVVI digits
 ros2 run hand_pack combined_gui
 ```
 
+<p align="center">
+  <img src="../../images/covvi_hand_cad_fingers_extended.png" width="47%" alt="RViz showing the COVVI hand URDF on its own with every joint slider at zero"/>
+  <img src="../../images/covvi_hand_blender_constraints.png" width="47%" alt="Gazebo running the hand alone with the hand_gui panel exposing both driver joints and the mimic distal joints"/>
+</p>
+<p align="center"><em>Left: the hand URDF alone with every joint at 0 (rest pose). Right: <code>hand_gui</code> over Gazebo — the panel exposes the 6 driver joints <em>and</em> the derived <code>*_distal_j01</code> mimic joints, which is what <code>clamp_hand_joint_limits</code> re-limits.</em></p>
+
 ---
 
-## Pós-processamento do URDF (`urdf_helpers.py`)
+## URDF post-processing (`urdf_helpers.py`)
 
-Três funções aplicadas em tempo de launch pelo `grasp_ml_pack` e `touch_pack`:
+Three functions applied at launch time by `grasp_ml_pack` and `touch_pack`:
 
 ### `clamp_hand_joint_limits(urdf_body)`
 
-Propaga os limites reais do firmware COVVI para o URDF. O URDF bruto do CAD usa `[0, 1.6 rad]` — o firmware clampa esses valores via `DigitConfigMsg.open_limit / close_limit`:
+Propagates the real COVVI firmware limits into the URDF. The raw CAD URDF uses `[0, 1.6 rad]` — the firmware clamps those values via `DigitConfigMsg.open_limit / close_limit`:
 
 ```python
-HAND_DRIVER_LIMITS = {  # close_limit do firmware — slider 100%
+HAND_DRIVER_LIMITS = {  # firmware close_limit — slider at 100%
     'Thumb': 1.00, 'Index': 1.00, 'Middle': 1.00,
     'Ring':  1.00, 'Little': 1.00, 'Rotate': 1.00,
 }
-HAND_DRIVER_LOWER = {   # open_limit do firmware — slider 0% (rest pose)
+HAND_DRIVER_LOWER = {   # firmware open_limit — slider at 0% (rest pose)
     'Thumb': 0.08, 'Index': 0.12, 'Middle': 0.12,
     'Ring':  0.12, 'Little': 0.12, 'Rotate': 0.00,
 }
 ```
 
-Os limites são propagados para as juntas mimic via `[mult · driver_lower, mult · driver_upper]`.
+The limits are propagated to the mimic joints as `[mult · driver_lower, mult · driver_upper]`.
 
 ### `inject_visual_skin_layer(urdf_body)`
 
-Adiciona uma camada visual inflada (~3 mm por face) sobre as falanges e palma, criando uma superfície contínua e suave no Gazebo. Usada para simular a pele da mão protética.
+Adds an inflated visual layer (~3 mm per face) over the phalanges and palm, creating a continuous, smooth surface in Gazebo. Used to simulate the skin of the prosthetic hand.
 
 ### `INTER_FINGER_COLLISION_LINKS`
 
-Lista de links onde `self_collide=true` e `mu=2.5` são aplicados — permite que os dedos interajam fisicamente entre si e com objetos sem atravessar a geometria.
+List of links where `self_collide=true` and `mu=2.5` are applied — this lets the fingers physically interact with each other and with objects instead of passing through the geometry.
 
 ---
 
 ## Controllers (`cr10_covvi_controllers.yaml`)
 
-Dois JTCs ativos no modo `hand`:
+Two JTCs are active in `hand` mode:
 
-| Controller | Tipo | Joints |
+| Controller | Type | Joints |
 |---|---|---|
 | `cr10_group_controller` | `JointTrajectoryController` | joint1–joint6 |
-| `hand_position_controller` | `JointTrajectoryController` | 6 primárias + 22 mimic (28 total) |
+| `hand_position_controller` | `JointTrajectoryController` | 6 primary + 22 mimic (28 total) |
 
-Taxa de atualização: 250 Hz. `allow_partial_joints_goal: true` no controlador da mão — permite enviar só os 6 drivers sem as mimic.
+Update rate: 250 Hz. `allow_partial_joints_goal: true` on the hand controller — this allows sending only the 6 drivers without the mimic joints.
 
 ---
 
-## Dependências
+## Dependencies
 
 ```xml
 <depend>robot_state_publisher</depend>

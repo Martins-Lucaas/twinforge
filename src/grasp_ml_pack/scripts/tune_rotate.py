@@ -9,7 +9,7 @@ polegar→objeto via FK. O valor com menor distância (sem penetração) é
 o ótimo.
 
 Uso:
-    cd /home/lucas-lpc/RoboticArm
+    cd /home/lucas-lpc/twinforge
     source install/setup.bash
     python3 src/grasp_ml_pack/scripts/tune_rotate.py
 """
