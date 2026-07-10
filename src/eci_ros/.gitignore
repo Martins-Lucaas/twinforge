@@ -1,0 +1,7 @@
+.venv
+.vscode
+.bash_history
+
+# Python bytecode (gerado pelo colcon/execução)
+__pycache__/
+*.py[cod]
