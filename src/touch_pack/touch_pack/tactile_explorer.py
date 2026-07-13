@@ -185,8 +185,12 @@ _DESCEND_TOUCH_V_MS    = 0.0002   # 0,2 mm/s: rastejo final com zona aprendida.
 _QS_SETTLE_TICKS   = 5       # ticks congelado antes de medir (150 ms > lag)
 _QS_MEDIAN_N       = 3       # amostras da mediana settled
 _QS_RELAX          = 0.7     # sub-relaxação do passo (robustez a erro de K_est)
-_QS_DF_MAX_N       = 0.4     # N: ΔF projetado máximo por micro-passo
-_QS_DX_MAX_M       = 2.0e-5  # 20 µm: teto absoluto do micro-passo
+_QS_DF_MAX_N       = 0.2     # N: ΔF projetado máximo por micro-passo. Era 0.4;
+                             #   sem ponta de silicone o contato é RÍGIDO e cada
+                             #   passo vira degrau seco de força — passos menores
+                             #   deixam a correção do overshoot suave
+_QS_DX_MAX_M       = 1.0e-5  # 10 µm: teto absoluto do micro-passo (era 20 µm;
+                             #   ver _QS_DF_MAX_N — contato rígido, passo fino)
 _QS_DX_PROBE_M     = 3.0e-6  # 3 µm: teto ANTES do 1º K_est settled — a
                              #   900 N/mm projeta ≤ 2,7 N (sob a margem)
 _QS_FREE_STEP_M    = 5.0e-6  # 5 µm/ciclo: re-aproximação se perder contato
@@ -199,7 +203,7 @@ _QS_DF_DEAD_N      = 0.05    # N: ΔF mínimo p/ considerar que o passo "pegou";
 _QS_BOOST_MAX      = 6.0     # teto do multiplicador anti-stiction. Sem teto,
                              #   coletas de 04/07 14:51/14:52: boost cresceu até
                              #   o passo acumulado estourar 7–9 N de uma vez
-_QS_DF_HARD_N      = 0.6     # N: teto DURO de ΔF projetado por passo, boost
+_QS_DF_HARD_N      = 0.3     # N: teto DURO de ΔF projetado por passo, boost
                              #   INCLUSO — se a resolução do atuador exigir
                              #   mais que isso, estaciona e dá timeout (limite
                              #   físico; complacência mecânica é a saída)
@@ -210,7 +214,8 @@ _QS_FREE_STEP_MAX_M = 8.0e-6 # 8 µm: teto da re-aproximação sem contato mesmo
                              #   com boost — limita o transiente de re-toque
 _QS_ARRIVE_S       = 0.35    # s: janela settled em banda p/ o DESCENDING
                              #   declarar chegada e entregar ao HOLD
-_QS_TIMEOUT_S      = 12.0    # s: teto da convergência inicial no DESCENDING
+_QS_TIMEOUT_S      = 20.0    # s: teto da convergência inicial no DESCENDING
+                             #   (era 12 s; passos 2× menores pedem mais tempo)
 # Creep/relaxação viscoelástica: nas coletas de 04/07 14:51–14:52 a força a
 # posição CONSTANTE relaxa até ~−1,2 N/s (τ ≈ 2–4 s). Dentro da banda o hold
 # não pode só congelar — o creep arrasta a força para fora pela borda de
@@ -397,9 +402,11 @@ class TactileExplorer(Node):
         self._approach_dir: np.ndarray | None = None
         self._user_home_q: np.ndarray | None = None
         self._speed_factor_pct: float = 10.0   # % do slider da GUI (padrão 10 %)
-        # SpeedFactor (%) da DESCIDA contínua em MovL — controlado pelo slider
-        # "Descent Speed" da GUI (campo approach_speed_mms do PalpationStart).
-        self._movl_descend_sf_pct: float = float(self._MOVL_APPROACH_SPEED_PCT)
+        # Velocidade cartesiana (mm/s) do PROBE em MovL — slider "Descent
+        # Speed" da GUI (campo approach_speed_mms do PalpationStart). Dita a
+        # cadência de emissão dos segmentos da descida contínua no ar livre.
+        self._movl_approach_mms: float = float(
+            self._MOVL_APPROACH_MMS_DEFAULT)
         # Repetições automáticas do experimento (campo 'repeats' da GUI).
         # _cycle/_cycles_total alimentam o status para a GUI mostrar "i/N".
         self._repeats: int = 1
@@ -410,6 +417,9 @@ class TactileExplorer(Node):
         self._hold_tol_n: float | None = None
         self._hold_stable_s: float | None = None
         self._hold_timeout_s: float | None = None
+        # Overrides dos tetos do micro-passo quase-estático (GUI, Advanced).
+        self._qs_dx_max_m: float | None = None
+        self._qs_df_hard_n: float | None = None
         self._lc_lock = threading.Lock()
         self._lc_force_net: float = 0.0   # compressão positiva, tare-compensada
         self._lc_force_ts: float = 0.0    # time.monotonic() da última leitura
@@ -522,11 +532,11 @@ class TactileExplorer(Node):
             mode = str(msg.mode).upper().strip()
             self._mode = mode if mode in ('SLIDE', 'TOUCH') else 'SLIDE'
             if msg.approach_speed_mms > 0.0:
-                # Slider "Descent Speed" da GUI: em MovL é o SpeedFactor (%) da
-                # descida contínua; no streaming/Gazebo é reusado como veloc. de
-                # aproximação (mm/s). Mesmo número, usos diferentes por modo.
-                self._movl_descend_sf_pct = float(
-                    max(1.0, min(100.0, float(msg.approach_speed_mms))))
+                # Slider "Descent Speed" da GUI (mm/s): em MovL é a cadência
+                # cartesiana do PROBE; no streaming/Gazebo é a velocidade de
+                # aproximação. Mesmo número, MESMA unidade nos dois modos.
+                self._movl_approach_mms = float(
+                    max(0.5, min(30.0, float(msg.approach_speed_mms))))
                 v_max = max(1.0, float(msg.approach_speed_mms))
                 v_min = max(0.5, v_max * 0.2)
                 self.set_parameters([
@@ -562,6 +572,10 @@ class TactileExplorer(Node):
                                    if msg.hold_stable_s > 0.0 else None)
             self._hold_timeout_s = (float(msg.hold_timeout_s)
                                     if msg.hold_timeout_s > 0.0 else None)
+            self._qs_dx_max_m = (float(msg.hold_dx_max_um) * 1e-6
+                                 if msg.hold_dx_max_um > 0.0 else None)
+            self._qs_df_hard_n = (float(msg.hold_df_max_n)
+                                  if msg.hold_df_max_n > 0.0 else None)
         self._pause_requested.clear()
         self._protocol_thread = threading.Thread(
             target=self._run_protocol, daemon=True)
@@ -796,6 +810,11 @@ class TactileExplorer(Node):
         """
         t_start = time.time()
         t_stable0: float | None = None
+        # Tetos do micro-passo — overrides da GUI (PalpationStart) ou defaults.
+        dx_max_m = (self._qs_dx_max_m if self._qs_dx_max_m is not None
+                    else _QS_DX_MAX_M)
+        df_hard_n = (self._qs_df_hard_n if self._qs_df_hard_n is not None
+                     else _QS_DF_HARD_N)
         deepened_m = 0.0
         fz_prev: float | None = None
         step_prev = 0.0
@@ -869,7 +888,7 @@ class TactileExplorer(Node):
                 # (_QS_DF_HARD_N), boost incluso: sem ele o passo acumulado
                 # estourava 7–9 N (coletas 04/07 14:51/14:52).
                 step_m = _QS_RELAX * err * boost / k
-                hard_cap = _QS_DF_HARD_N / k
+                hard_cap = df_hard_n / k
                 step_m = float(np.clip(step_m, -hard_cap, hard_cap))
                 if not self._k_est.estimated:
                     # K desconhecida: o teto por ΔF projetado não protege —
@@ -878,7 +897,7 @@ class TactileExplorer(Node):
                     step_m = float(np.clip(step_m, -probe_cap, probe_cap))
                 if step_m < 0.0:
                     step_m = max(step_m, -(fz - _QS_RELIEF_FLOOR_N) / k)
-            step_m = float(np.clip(step_m, -_QS_DX_MAX_M, _QS_DX_MAX_M))
+            step_m = float(np.clip(step_m, -dx_max_m, dx_max_m))
             if budget_m is not None and deepened_m + step_m > budget_m:
                 step_m = budget_m - deepened_m
                 if step_m <= 1e-7 and err > 0.0:
@@ -1415,10 +1434,10 @@ class TactileExplorer(Node):
 
         # Modo MovL: calibra o mapeamento de frame mundo→DOBOT em ar livre
         # (a GUI faz 2 sondas laterais de ±5 mm e mede o delta via FK). SÓ é
-        # necessário para o SLIDING (movimento lateral); no modo TOUCH (só
-        # descida vertical) é inútil — eram esses os "pequenos movimentos
-        # laterais antes de descer". Calibra apenas quando VAI deslizar.
-        # Idempotente — a GUI ignora se já calibrado nesta sessão.
+        # necessária para o SLIDING (movimento lateral); no modo TOUCH a
+        # descida é vertical pura (RelMovL 0,0,dz dispensa o frame) — sondar
+        # seria movimento lateral inútil antes de descer. Idempotente — a GUI
+        # ignora se já calibrado nesta sessão.
         if self._movl_run and self._mode != 'TOUCH':
             self._real_cmd('calibrate_frame')
             time.sleep(0.3)   # sondas correm na fila serial da GUI antes
@@ -1462,11 +1481,11 @@ class TactileExplorer(Node):
         self._set_phase('DESCENDING')
         self._settle()
 
-        # Aproximação ESTRITAMENTE VERTICAL: desce só no Z do mundo (para baixo)
-        # até o contato — pedido do operador (descer linearmente só em Z). O robô
-        # é montado na vertical, então RelMovL(0,0,dz) dispensa calibração de
-        # frame (ver palpation_gui._movl_execute) e não sofre com pequenas
-        # inclinações da ferramenta que a coluna Z do frame TCP arrastaria.
+        # Aproximação ESTRITAMENTE VERTICAL: desce só no Z do mundo, para
+        # baixo, até a força alvo. O robô é montado na vertical, então
+        # RelMovL(0,0,dz) dispensa calibração de frame (fast-path da GUI) e
+        # não sofre com pequenas inclinações da ferramenta que a coluna Z do
+        # frame TCP arrastaria para X/Y.
         approach_dir = np.array([0.0, 0.0, -1.0])
         self._approach_dir = approach_dir.copy()
 
@@ -1636,68 +1655,115 @@ class TactileExplorer(Node):
         return 'no_contact'
 
     # ── Fases em modo MovL (robô real executa; monitores aqui) ──────────
-    # Descida MovL = passos PEQUENOS em MovJ, NUNCA um movimento gigante. Um
-    # RelMovL de 60 mm + halt (Stop+Continue) NÃO parava de fato — o Continue
-    # retomava o curso restante e a força ia a ~44 N no HOLD. Com passos pequenos
-    # (≤ _MOVJ_PIPE_M de curso comprometido à frente do medido), o pior caso de
-    # curso após QUALQUER parada é minúsculo ⇒ SEGURO por construção, e o abort
-    # a 12 N para na hora. Cada passo é um MovJ para o alvo articular do próximo
-    # Δz (via Jacobiano, como o streaming); um pipeline raso mantém a fila curta
-    # e o movimento contínuo (blend). Velocidade = SpeedFactor da GUI (slider
-    # "Descent Speed"): BAIXO = descida lenta e controlada.
-    _MOVJ_STEP_M = 0.05e-3   # 0,05 mm (50 µm): curso por passo MovJ (micro-passo)
-    _MOVJ_PIPE_M = 0.08e-3   # 0,08 mm: curso máx comprometido à frente do medido.
-                             # Teto do overshoot no contato ≈ K_contato × este:
-                             # com K≈11 N/mm (medido) ⇒ ~0,9 N; no abort a 12 N o
-                             # pico fica ~12,9 N, bem abaixo do teto de 15 N.
-    _MOVL_APPROACH_SPEED_PCT = 1      # SpeedFactor (%) default da descida
-                                      # (fallback do slider "Descent Speed").
-    # SpeedFactor (%) do SLIDING: o deslize é UM RelMovL lateral CONTÍNUO (altura
-    # travada pela geometria do MovL, força varia = sinal de textura). NÃO é
-    # micro-passado — paradas a 33 Hz injetariam vibração no sinal. Aqui só se
-    # rebaixa o SpeedFactor para o movimento lateral ficar lento e controlado,
-    # mantendo a suavidade. Não há mm/s→% validado; ajuste este % pela veloc. de
-    # slide desejada. Restaurado ao valor da GUI ao fim da fase.
-    _MOVL_SLIDE_SPEED_PCT = 8
+    # Descida MovL = máquina de estados PROBE → RELAX → FINE (contato 100%
+    # RÍGIDO, sem ponta de silicone; os NOMES de fase gravados nos dados
+    # continuam DESCENDING/HOLD):
+    #   PROBE — descida CONTÍNUA no ar livre, no ritmo cartesiano do slider
+    #           "Descent Speed" (mm/s): segmentos de 0,4 mm emitidos na
+    #           cadência de v (o robô encadeia por blending), pipeline raso
+    #           ≤ 0,8 mm comprometido. Gatilho SENSÍVEL de contato
+    #           (fz > _CONTACT_ON_N = 0,05 N) ⇒ HALT imediato.
+    #           LIÇÃO (10/07 e 13/07): halt NÃO cancela curso já comandado —
+    #           os ≤ 0,8 mm comprometidos executam MESMO após o halt. O pico
+    #           de inércia esperado é ≈ 0,8 mm × K≈11 N/mm ≈ 9 N (sob a
+    #           margem de 12 N) e é DESFEITO pelo RELAX — rápido no ar,
+    #           agressivo na parada, alívio explícito depois. Com contato
+    #           aprendido na sessão, a cadência cai a _MOVL_PROBE_SLOW_MMS
+    #           nos últimos _MOVL_PROBE_ZONE_M (pico proporcionalmente menor).
+    #   RELAX — pós-halt: mede o pico de inércia; acima de alvo +
+    #           _RELAX_OVER_N, micro-recuos verticais de _RELAX_BACK_M
+    #           aliviam a tensão mecânica da célula até voltar perto do alvo.
+    #   FINE  — sintonia fina move-then-measure (_qs_regulate: mede settled,
+    #           UM micropasso ≤ _QS_DX_MAX_M, mede de novo) até assentar na
+    #           banda do setpoint, no SpeedFactor mínimo.
+    _MOVL_PROBE_SEG_M  = 4.0e-4   # 0,4 mm: segmento do PROBE
+    _MOVL_PROBE_PIPE_M = 8.0e-4   # 0,8 mm: curso máx comprometido à frente do
+                                  # medido — TETO do pico de inércia (× K)
+    _MOVL_PROBE_ZONE_M = 2.0e-3   # 2 mm: zona lenta antes do contato aprendido
+    _MOVL_PROBE_SLOW_MMS = 2.0    # mm/s: cadência dentro da zona aprendida
+    _MOVL_MMS_TO_PCT   = 3.0      # mm/s → SpeedFactor %: folga p/ o robô dar
+                                  # conta da cadência (âncora: 10% ≈ 2,7 mm/s
+                                  # na coleta de 04/07); se faltar, a cadência
+                                  # satura na velocidade real do robô
+    _MOVL_APPROACH_MMS_DEFAULT = 8.0   # mm/s: fallback do slider da GUI
+    _RELAX_OVER_N      = 1.0      # N ACIMA do alvo que dispara o micro-recuo
+                                  # (alvo 1 N ⇒ recua enquanto fz > 2 N)
+    _RELAX_BACK_M      = 1.5e-4   # 0,15 mm por micro-recuo vertical
+    _RELAX_MAX_TRIES   = 8        # teto de micro-recuos (8 × 0,15 = 1,2 mm)
+    _MOVL_FINE_SF_PCT  = 1        # SpeedFactor (%) do FINE/HOLD: mínimo
+                                  # absoluto do sistema
+    _MOVL_SLIDE_SPEED_PCT = 8     # SpeedFactor (%) do RelMovL lateral do
+                                  # SLIDING (lento/contínuo; não há mm/s→%
+                                  # validado — ajustar aqui se preciso)
+
+    def _movl_progress(self, p_start: np.ndarray, d: np.ndarray) -> float:
+        """Curso executado ao longo de `d` desde `p_start` (via FK)."""
+        p_now = forward_kinematics(
+            self._q_now(), T_end=T_TOUCH_TOOL_ATTACH)[:3, 3]
+        return float(np.dot(p_now - p_start, d))
+
+    def _movl_wait_quiet(self, p_start: np.ndarray, d: np.ndarray,
+                         max_ticks: int = 40) -> float:
+        """Espera o TCP PARAR de fato após um halt (FK quieta por 3 ticks);
+        devolve o progresso final. Sem isso o estágio seguinte partiria com
+        o braço ainda em movimento e a 1ª medição sairia contaminada."""
+        last = self._movl_progress(p_start, d)
+        quiet = 0
+        for _ in range(max_ticks):
+            time.sleep(_CTRL_DT)
+            # Curso em voo pode estar comprimindo a célula durante a espera:
+            # acima da margem, sai NA HORA — o chamador (loop de segurança /
+            # _qs_regulate) trata o excesso imediatamente.
+            if self._fz_corrected() > _FORCE_SAFE_LIMIT_N:
+                return self._movl_progress(p_start, d)
+            prog = self._movl_progress(p_start, d)
+            quiet = quiet + 1 if abs(prog - last) < 2e-5 else 0
+            last = prog
+            if quiet >= 3:
+                break
+        return last
 
     def _movl_descend(self, approach_dir: np.ndarray, depth_m: float,
                       target_f: float, exit_tol: float,
                       v_lim: float, I6: np.ndarray) -> str:
-        """DESCENDING em modo MovL: passos PEQUENOS em MovJ até o setpoint.
+        """DESCENDING em modo MovL — máquina de estados PROBE → RELAX → FINE
+        (ver bloco de constantes acima): descida contínua no ar livre à
+        velocidade do slider (mm/s), halt agressivo no toque, micro-recuo
+        para desfazer o pico de inércia e sintonia fina move-then-measure.
+        Monitor de força a 33 Hz o tempo todo.
 
-        Bem lento e controlado, em micro-passos (como era antes): cada passo é
-        um MovJ para o alvo articular do próximo Δz=_MOVJ_STEP_M (via Jacobiano);
-        um pipeline raso mantém ≤ _MOVJ_PIPE_M de curso comprometido à frente do
-        medido, então o movimento é contínuo (blend) MAS nunca há um curso
-        grande enfileirado que possa disparar. Velocidade = SpeedFactor da GUI
-        (slider "Descent Speed"); restaurado ao valor da GUI ao sair.
-
-        SEGURANÇA: fz ≥ _FORCE_SAFE_LIMIT_N (12 N) → PARA na hora e aborta (o
-        _run_protocol volta à home). Como só há ≤ _MOVJ_PIPE_M comprometidos, a
-        parada é efetiva mesmo se o halt do firmware for preguiçoso.
-
-        v_lim / I6 são herdados da assinatura (usados só no caminho streaming).
         Retorna 'ok' | 'no_contact' | 'force' | 'stale' | 'stop' | 'error'.
         """
         p_start = forward_kinematics(
             self._q_now(), T_end=T_TOUCH_TOOL_ATTACH)[:3, 3].copy()
         d = np.asarray(approach_dir, float)
-        gui_speed_pct = int(max(1, min(100, round(self._speed_factor_pct))))
-        descend_sf_pct = int(max(1, min(100, round(self._movl_descend_sf_pct))))
-        I6l = np.eye(6)
-        q_cmd = self._q_now()          # alvo articular acumulado (comandado)
-        progress_cmd = 0.0             # curso comandado a partir de p_start
-        contact_logged = False
+        up = -d   # direção do micro-recuo do RELAX (vertical, para cima)
+        gui_pct = int(max(1, min(100, round(self._speed_factor_pct))))
+        v_mms = float(np.clip(self._movl_approach_mms, 0.5, 30.0))
+        v_slow_mms = min(v_mms, self._MOVL_PROBE_SLOW_MMS)
+        probe_pct = int(np.clip(round(v_mms * self._MOVL_MMS_TO_PCT), 3, 40))
+        with self._params_lock:
+            learned_m = self._learned_contact_m
+        # Zona aprendida: a cadência cai para v_slow ESTA distância antes do
+        # contato conhecido (pico de inércia proporcionalmente menor).
+        slow_from_m = (max(0.0, learned_m - self._MOVL_PROBE_ZONE_M)
+                       if learned_m is not None else None)
+        sent_m = 0.0
+        progress = 0.0
+        t_next_send = time.time()
         t_deadline = time.time() + 180.0
+        zona = (f' (lenta a {v_slow_mms:.1f} mm/s após '
+                f'{slow_from_m*1e3:.1f} mm)'
+                if slow_from_m is not None else '')
         self.get_logger().info(
-            f'[MOVL] DESCENDING: micro-passos MovJ — alvo={target_f:.2f} N, '
-            f'passo={self._MOVJ_STEP_M*1e3:.2f} mm, curso máx {depth_m*1e3:.0f} mm '
-            f'a SpeedFactor {descend_sf_pct}% (Descent Speed; volta a '
-            f'{gui_speed_pct}% na saída). ABORTA em ≥ {_FORCE_SAFE_LIMIT_N:.0f} N.')
-        # SpeedFactor baixo UMA vez; os MovJ da descida não o resetam (set_speed
-        # False), diferente do MovJ de home que usa o SpeedFactor do slider.
-        self._real_cmd('speed', pct=descend_sf_pct)
+            f'[MOVL] DESCENDING/PROBE: alvo {target_f:.2f} N '
+            f'(banda ±{exit_tol:.2f}), curso máx {depth_m*1e3:.1f} mm — '
+            f'descida contínua a {v_mms:.1f} mm/s{zona}, SpeedFactor '
+            f'{probe_pct}%, halt no toque (> {_CONTACT_ON_N:.2f} N), '
+            f'pipeline ≤ {self._MOVL_PROBE_PIPE_M*1e3:.1f} mm.')
+        self._real_cmd('speed', pct=probe_pct)
         try:
+            # ── PROBE: descida contínua até o gatilho de contato ──────────
             while True:
                 if self._stop_requested.is_set():
                     self._stop_requested.clear()
@@ -1705,137 +1771,165 @@ class TactileExplorer(Node):
                     self.get_logger().warn(
                         '[STOP] DESCENDING interrompido pelo usuário.')
                     return 'stop'
+                was_paused = self._pause_requested.is_set()
                 if not self._pause_gate():
                     return 'stop'
+                if was_paused:
+                    # O halt da pausa descartou o que estava na fila —
+                    # ressincroniza o enviado com o executado e re-emite.
+                    progress = self._movl_wait_quiet(p_start, d)
+                    sent_m = max(0.0, progress)
+                    t_next_send = time.time()
 
                 if self._force_stale_abort('DESCENDING'):
                     self._real_cmd('halt')
                     return 'stale'
                 fz = self._fz_corrected()
-                # SEGURANÇA absoluta: 12 N ou mais → para na hora e aborta.
-                if fz >= _FORCE_SAFE_LIMIT_N:
-                    self._real_cmd('halt')
+                if fz > _FORCE_SAFE_LIMIT_N:
+                    self._relieve_contact(d)   # movl: halt + recuo linear
                     self.get_logger().error(
-                        f'SEGURANÇA: compressão {fz:.1f} N ≥ {_FORCE_SAFE_LIMIT_N:.0f} N '
-                        f'— PARA e aborta para a home (teto {_FORCE_ABORT_LIMIT_N:.0f} N).')
+                        f'SEGURANÇA: compressão {fz:.1f} N > margem '
+                        f'{_FORCE_SAFE_LIMIT_N:.0f} N (teto '
+                        f'{_FORCE_ABORT_LIMIT_N:.0f} N) — medição cancelada.')
                     return 'force'
 
-                p_now = forward_kinematics(
-                    self._q_now(), T_end=T_TOUCH_TOOL_ATTACH)[:3, 3]
-                progress = float(np.dot(p_now - p_start, d))
+                progress = self._movl_progress(p_start, d)
 
-                if not contact_logged and fz > _CONTACT_ON_N:
-                    contact_logged = True
-                    self.get_logger().info(
-                        f'[MOVL] DESCENDING: contato em {progress*1e3:.1f} mm '
-                        f'(fz={fz:.2f} N) — seguindo em micro-passos até o setpoint.')
-
-                # Setpoint atingido → PARA. A posição parada é o hold.
-                if fz >= target_f:
+                if fz > _CONTACT_ON_N:
+                    # CONTATO: HALT imediato. O curso já comprometido
+                    # (≤ pipeline) ainda executa — o pico de inércia
+                    # resultante é medido e DESFEITO no RELAX.
                     self._real_cmd('halt')
+                    progress = self._movl_wait_quiet(p_start, d)
                     if progress > 0.001:
                         with self._params_lock:
                             self._learned_contact_m = progress
                     self.get_logger().info(
-                        f'[MOVL] DESCENDING: setpoint atingido — fz={fz:.2f} N '
-                        f'(alvo {target_f:.2f} N) em {progress*1e3:.1f} mm.')
-                    return 'ok'
+                        f'[MOVL] DESCENDING/PROBE: contato em '
+                        f'{progress*1e3:.1f} mm (gatilho fz={fz:.2f} N; '
+                        f'após inércia fz={self._fz_corrected():.2f} N) '
+                        '— RELAX.')
+                    break
 
                 if progress >= depth_m - 3e-4:
                     self._real_cmd('halt')
                     self.get_logger().warn(
-                        f'[MOVL] DESCENDING: curso máximo de {progress*1e3:.1f} mm '
-                        f'esgotado sem atingir {target_f:.2f} N (fz={fz:.2f} N).')
+                        f'[MOVL] DESCENDING/PROBE: curso máximo de '
+                        f'{progress*1e3:.1f} mm esgotado sem contato '
+                        f'(fz={fz:.2f} N).')
                     return 'no_contact'
 
-                # Pipeline raso: enfileira micro-passos MovJ enquanto o curso
-                # COMPROMETIDO à frente do medido for < _MOVJ_PIPE_M (fila curta
-                # ⇒ contínuo, mas nunca um curso grande pendente).
-                while (progress_cmd - progress < self._MOVJ_PIPE_M
-                       and progress_cmd < depth_m):
-                    step = min(self._MOVJ_STEP_M, depth_m - progress_cmd)
-                    tw = np.zeros(6)
-                    tw[:3] = d * step
-                    J = jacobian(q_cmd, T_end=T_TOUCH_TOOL_ATTACH)
-                    try:
-                        dq = J.T @ np.linalg.solve(
-                            J @ J.T + _JAC_LAM**2 * I6l, tw)
-                    except np.linalg.LinAlgError:
-                        break
-                    q_cmd = np.clip(q_cmd + dq, JOINT_MIN, JOINT_MAX)
-                    self._real_cmd('movj',
-                                   q_urdf=[float(v) for v in q_cmd],
-                                   set_speed=False)
-                    progress_cmd += step
+                # Emissão CADENCIADA: segmentos de _MOVL_PROBE_SEG_M no
+                # ritmo da velocidade cartesiana pedida — o robô encadeia
+                # os segmentos (blend) e o TCP anda ≈ v; o pipeline raso
+                # limita o curso comprometido (= teto do pico de inércia).
+                now = time.time()
+                v_now = (v_slow_mms if (slow_from_m is not None
+                                        and progress >= slow_from_m)
+                         else v_mms)
+                if (now >= t_next_send
+                        and sent_m < depth_m
+                        and (sent_m - progress) + self._MOVL_PROBE_SEG_M
+                        <= self._MOVL_PROBE_PIPE_M):
+                    seg = min(self._MOVL_PROBE_SEG_M, depth_m - sent_m)
+                    self._real_cmd(
+                        'rel', d_mm=[float(v) for v in (d * seg * 1e3)])
+                    sent_m += seg
+                    # Agenda o próximo envio para manter a cadência v_now.
+                    t_next_send = max(now, t_next_send) + seg / (v_now * 1e-3)
 
                 if time.time() > t_deadline:
                     self._real_cmd('halt')
                     self.get_logger().error(
-                        f'[MOVL] DESCENDING: timeout 180 s '
+                        f'[MOVL] DESCENDING/PROBE: timeout 180 s '
                         f'(progress={progress*1e3:.1f}/{depth_m*1e3:.1f} mm, '
-                        f'fz={fz:.2f} N) — o robô real está executando? Abortando.')
+                        f'fz={fz:.2f} N) — o robô real está executando? '
+                        'Abortando.')
                     return 'error'
                 time.sleep(_CTRL_DT)
+
+            # ── RELAX: desfaz o pico de inércia com micro-recuos ──────────
+            # O halt não cancelou o pipeline: a inércia esmagou a célula além
+            # do gatilho. Recua em passos verticais rígidos até a força
+            # voltar perto do alvo, ainda no SpeedFactor do PROBE (recuar
+            # rápido é seguro — afasta da célula).
+            relax_trip = target_f + self._RELAX_OVER_N
+            for _ in range(self._RELAX_MAX_TRIES):
+                if self._force_stale_abort('DESCENDING'):
+                    return 'stale'
+                fz = self._fz_corrected()
+                if fz > _FORCE_SAFE_LIMIT_N:
+                    self._relieve_contact(d)
+                    self.get_logger().error(
+                        f'SEGURANÇA: pico de inércia {fz:.1f} N > margem '
+                        f'{_FORCE_SAFE_LIMIT_N:.0f} N — medição cancelada.')
+                    return 'force'
+                if fz <= relax_trip:
+                    break
+                self.get_logger().info(
+                    f'[MOVL] DESCENDING/RELAX: fz={fz:.2f} N > '
+                    f'{relax_trip:.2f} N — micro-recuo de '
+                    f'{self._RELAX_BACK_M*1e3:.2f} mm.')
+                self._real_cmd('rel', d_mm=[
+                    float(v) for v in (up * self._RELAX_BACK_M * 1e3)])
+                # Espera o recuo executar e a leitura (mediana/EMA) assentar.
+                time.sleep(2 * _QS_SETTLE_TICKS * _CTRL_DT)
+            else:
+                self.get_logger().warn(
+                    f'[MOVL] DESCENDING/RELAX: fz='
+                    f'{self._fz_corrected():.2f} N ainda acima de '
+                    f'{relax_trip:.2f} N após {self._RELAX_MAX_TRIES} '
+                    'micro-recuos — o FINE alivia o restante em micropassos.')
+            progress = self._movl_progress(p_start, d)
+
+            # ── FINE: sintonia fina move-then-measure até settle em banda ─
+            # Micro-passos ≤ _QS_DX_MAX_M dimensionados por K_est, com
+            # medição settled entre passos — fecha no setpoint sem novo
+            # transiente (contato rígido), no SpeedFactor mínimo.
+            self._real_cmd('speed', pct=self._MOVL_FINE_SF_PCT)
+            out, fz_end = self._qs_regulate(
+                target_f, exit_tol, d, v_lim, I6,
+                budget_m=max(0.0, depth_m - progress),
+                stable_s=_QS_ARRIVE_S, timeout_s=_QS_TIMEOUT_S,
+                phase='DESCENDING-FINE')
+            if out == 'ok' or out == 'timeout':
+                if out == 'timeout':
+                    self.get_logger().warn(
+                        f'DESCENDING-FINE: sem estabilizar em '
+                        f'{_QS_TIMEOUT_S:.0f} s (fz={fz_end:.2f} N) — '
+                        'entregando ao HOLD, que continua regulando.')
+                else:
+                    self.get_logger().info(
+                        f'DESCENDING-FINE: estabilizado — fz={fz_end:.2f} N '
+                        f'(alvo {target_f:.2f} ± {exit_tol:.2f} N).')
+                return 'ok'
+            if out == 'budget':
+                self.get_logger().warn(
+                    f'DESCENDING-FINE: curso máximo esgotado sem sustentar '
+                    f'{target_f:.2f} N (fz={fz_end:.2f} N).')
+                return 'no_contact'
+            return out   # 'force' | 'stale' | 'stop'
         finally:
-            # Restaura o SpeedFactor da GUI em QUALQUER saída da fase.
-            self._real_cmd('speed', pct=gui_speed_pct)
-
-    def _movl_hold(self, target_f: float, tol_n: float,
-                   approach_dir: np.ndarray, stable_s: float,
-                   dwell_s: float, timeout_s: float) -> str:
-        """HOLD em modo MovL: mantém a POSIÇÃO parada e mede.
-
-        Após a descida contínua parar no setpoint, a posição travada já É o
-        hold — a força fica onde ficou (o MovL não faz regulação fina por
-        micro-passos, que não executam neste robô). Aqui só se mantém parado por
-        `stable_s + dwell_s` (janela de medição), monitorando a segurança de
-        força e o frescor da célula. Sem comandos de movimento."""
-        hold_s = float(stable_s) + float(dwell_s)
-        self.get_logger().info(
-            f'[MOVL] HOLD: mantendo posição por {hold_s:.1f} s (medição) — '
-            f'fz={self._fz_corrected():.2f} N (alvo {target_f:.2f} ± {tol_n:.2f} N).')
-        t_end = time.time() + hold_s
-        while time.time() < t_end:
-            if self._stop_requested.is_set():
-                self._stop_requested.clear()
-                self._real_cmd('halt')
-                self.get_logger().warn('[STOP] HOLD interrompido pelo usuário.')
-                return 'stop'
-            if not self._pause_gate():
-                return 'stop'
-            if self._force_stale_abort('HOLD'):
-                self._real_cmd('halt')
-                return 'stale'
-            fz = self._fz_corrected()
-            # SEGURANÇA absoluta: 12 N ou mais → para na hora e aborta à home.
-            if fz >= _FORCE_SAFE_LIMIT_N:
-                self._real_cmd('halt')
-                self.get_logger().error(
-                    f'SEGURANÇA: compressão {fz:.1f} N ≥ {_FORCE_SAFE_LIMIT_N:.0f} N '
-                    f'— PARA e aborta para a home (teto {_FORCE_ABORT_LIMIT_N:.0f} N).')
-                return 'force'
-            time.sleep(_CTRL_DT)
-        self.get_logger().info(
-            f'[MOVL] HOLD: medição concluída — fz={self._fz_corrected():.2f} N '
-            f'(alvo {target_f:.2f} ± {tol_n:.2f} N).')
-        return 'ok'
+            # Restaura o SpeedFactor global da GUI em QUALQUER saída da fase.
+            self._real_cmd('speed', pct=gui_pct)
 
     def _movl_slide(self, dir_world: np.ndarray, slide_lim_m: float,
                     approach_dir_eff: np.ndarray,
                     p_start: np.ndarray) -> str:
-        """SLIDING em modo MovL: UM RelMovL lateral CONTÍNUO — a linearidade
-        (altura constante) é garantida pela geometria do MovL, sem locks
-        Jacobianos, e a força varia livre (sinal de textura, NÃO corrigida).
-        Movimento lento e controlado via SpeedFactor rebaixado
-        (_MOVL_SLIDE_SPEED_PCT), restaurado ao valor da GUI ao fim da fase.
+        """SLIDING em modo MovL: UM RelMovL lateral CONTÍNUO com o Z TRAVADO
+        pela geometria do MovL (dz=0 no comando), sem locks Jacobianos — a
+        força fica constante enquanto a superfície for plana; a variação
+        residual é o sinal de textura (NÃO corrigida). Movimento lento e
+        controlado via SpeedFactor rebaixado (_MOVL_SLIDE_SPEED_PCT),
+        restaurado ao valor global da GUI ao fim da fase.
         Monitor a 33 Hz: segurança de força, afundamento, direção errada
         (frame mal calibrado) e progresso via FK.
         """
         d = np.asarray(dir_world, float)
-        gui_speed_pct = int(max(1, min(100, round(self._speed_factor_pct))))
+        gui_pct = int(max(1, min(100, round(self._speed_factor_pct))))
         outcome = 'ok'
         # SpeedFactor rebaixado ANTES do RelMovL — o segmento lateral inteiro
-        # executa lento (movimento suave, sem paradas).
+        # executa lento e contínuo (sem paradas que injetariam vibração).
         self._real_cmd('speed', pct=self._MOVL_SLIDE_SPEED_PCT)
         self._real_cmd('rel', d_mm=[float(v) for v in (d * slide_lim_m * 1e3)])
         t_deadline = time.time() + 120.0
@@ -1894,12 +1988,12 @@ class TactileExplorer(Node):
                 outcome = 'stale'
                 break
             fz_corr = self._fz_corrected()
-            # SEGURANÇA absoluta: 12 N ou mais → para na hora e aborta à home.
-            if fz_corr >= _FORCE_SAFE_LIMIT_N:
-                self._real_cmd('halt')
+            if fz_corr > _FORCE_SAFE_LIMIT_N:
+                self._relieve_contact(approach_dir_eff)
                 self.get_logger().error(
-                    f'SEGURANÇA: compressão {fz_corr:.1f} N ≥ {_FORCE_SAFE_LIMIT_N:.0f} N '
-                    f'— PARA e aborta para a home (teto {_FORCE_ABORT_LIMIT_N:.0f} N).')
+                    f'SEGURANÇA: compressão {fz_corr:.1f} N > margem '
+                    f'{_FORCE_SAFE_LIMIT_N:.0f} N (teto '
+                    f'{_FORCE_ABORT_LIMIT_N:.0f} N) — medição cancelada.')
                 outcome = 'force'
                 break
 
@@ -1923,9 +2017,9 @@ class TactileExplorer(Node):
                 break
             time.sleep(_CTRL_DT)
 
-        # Restaura o SpeedFactor da GUI (todo break passa por aqui; não há
-        # return interno ao laço).
-        self._real_cmd('speed', pct=gui_speed_pct)
+        # Restaura o SpeedFactor global da GUI (todo break passa por aqui;
+        # não há return interno ao laço).
+        self._real_cmd('speed', pct=gui_pct)
         self._settle()
         return outcome
 
@@ -1967,12 +2061,6 @@ class TactileExplorer(Node):
         I6 = np.eye(6)
         v_lim = (self._speed_factor_pct / 100.0) * _MAX_JOINT_VEL_RAD_S
 
-        # Robô real: mesma malha linear controlada da descida (sem overshoot,
-        # parado em banda durante a medição).
-        if self._movl_run:
-            return self._movl_hold(target_f, tol_n, approach_dir,
-                                   stable_s, dwell_s, timeout_s)
-
         self.get_logger().info(
             f'HOLD-QS: alvo {target_f:.2f} ± {tol_n:.2f} N  '
             f'K_est={self._k_est.value/1000:.0f} N/mm  '
@@ -1980,39 +2068,64 @@ class TactileExplorer(Node):
             f'(timeout {timeout_s:.0f} s)')
 
         t_start = time.time()
-        out, fz = self._qs_regulate(target_f, tol_n, approach_dir, v_lim, I6,
-                                    budget_m=None, stable_s=stable_s,
-                                    timeout_s=timeout_s, phase='HOLD-QS')
-        if out in ('force', 'stale', 'stop'):
-            return out
-        timed_out = out == 'timeout'
-
-        # ── Dwell de medição: mantém o setpoint por dwell_s ──────────────
-        # Mesma regulação quase-estática, agora exigindo dwell_s CONTÍNUOS
-        # em banda — a janela de medição sai garantidamente estável.
-        if not timed_out and dwell_s > 0.0:
-            self.get_logger().info(
-                f'HOLD-QS: estável — mantendo {dwell_s:.1f} s (medição).')
-            out, fz = self._qs_regulate(
-                target_f, tol_n, approach_dir, v_lim, I6,
-                budget_m=None, stable_s=dwell_s,
-                timeout_s=dwell_s + timeout_s, phase='HOLD-QS-DWELL')
+        if self._movl_run:
+            # Contato ativo em robô real: micro-passos do hold no SpeedFactor
+            # mínimo absoluto; restaurado ao valor da GUI ao sair da fase.
+            self._real_cmd('speed', pct=self._MOVL_FINE_SF_PCT)
+        try:
+            out, fz = self._qs_regulate(target_f, tol_n, approach_dir,
+                                        v_lim, I6,
+                                        budget_m=None, stable_s=stable_s,
+                                        timeout_s=timeout_s, phase='HOLD-QS')
             if out in ('force', 'stale', 'stop'):
                 return out
             timed_out = out == 'timeout'
 
-        if timed_out:
-            self.get_logger().warn(
-                f'HOLD-QS: timeout ({timeout_s:.0f} s) sem estabilizar — '
-                f'fz={self._fz_corrected():.2f} N '
-                f'(alvo {target_f:.2f} ± {tol_n:.2f} N). Prosseguindo: '
-                'o deadbeat do SLIDING continua corrigindo.')
-        else:
-            self.get_logger().info(
-                f'HOLD-QS: medição concluída — fz={self._fz_corrected():.2f} N '
-                f'(alvo {target_f:.2f} ± {tol_n:.2f} N, estável {stable_s:.1f} s '
-                f'+ dwell {dwell_s:.1f} s) em {time.time() - t_start:.1f} s.')
-        return 'ok'
+            # ── Dwell de medição: mantém o setpoint por dwell_s ──────────
+            # Mesma regulação quase-estática, agora exigindo dwell_s
+            # CONTÍNUOS em banda — a janela de medição sai garantidamente
+            # estável.
+            if not timed_out and dwell_s > 0.0:
+                self.get_logger().info(
+                    f'HOLD-QS: estável — mantendo {dwell_s:.1f} s (medição).')
+                out, fz = self._qs_regulate(
+                    target_f, tol_n, approach_dir, v_lim, I6,
+                    budget_m=None, stable_s=dwell_s,
+                    timeout_s=dwell_s + timeout_s, phase='HOLD-QS-DWELL')
+                if out in ('force', 'stale', 'stop'):
+                    return out
+                timed_out = out == 'timeout'
+
+            if timed_out:
+                if self._movl_run:
+                    # Robô real: o SLIDING só pode partir de força
+                    # PERFEITAMENTE estabilizada no setpoint (deslizar com
+                    # pico residual em contato rígido esmaga a célula). Sem
+                    # estabilização → aborta com retorno à home.
+                    self.get_logger().error(
+                        f'HOLD-QS: timeout ({timeout_s:.0f} s) sem '
+                        f'estabilizar — fz={self._fz_corrected():.2f} N '
+                        f'(alvo {target_f:.2f} ± {tol_n:.2f} N). Em MovL o '
+                        'SLIDING NÃO inicia sem estabilização; abortando.')
+                    return 'timeout'
+                self.get_logger().warn(
+                    f'HOLD-QS: timeout ({timeout_s:.0f} s) sem estabilizar — '
+                    f'fz={self._fz_corrected():.2f} N '
+                    f'(alvo {target_f:.2f} ± {tol_n:.2f} N). Prosseguindo: '
+                    'o deadbeat do SLIDING continua corrigindo.')
+            else:
+                self.get_logger().info(
+                    f'HOLD-QS: medição concluída — '
+                    f'fz={self._fz_corrected():.2f} N '
+                    f'(alvo {target_f:.2f} ± {tol_n:.2f} N, estável '
+                    f'{stable_s:.1f} s + dwell {dwell_s:.1f} s) em '
+                    f'{time.time() - t_start:.1f} s.')
+            return 'ok'
+        finally:
+            if self._movl_run:
+                self._real_cmd(
+                    'speed',
+                    pct=int(max(1, min(100, round(self._speed_factor_pct)))))
 
     def _phase_sliding(self) -> str:
         """SLIDING — movimento lateral com ALTURA (Z) TRAVADA em posição.
@@ -2078,9 +2191,10 @@ class TactileExplorer(Node):
 
         if self._movl_run:
             self.get_logger().info(
-                f'[MOVL] SLIDING: RelMovL lateral CONTÍNUO de {slide_lim_m*1e3:.0f} mm '
-                f'dir=({dir_world[0]:+.0f},{dir_world[1]:+.0f},0) — altura '
-                f'constante por geometria, lento a SpeedFactor '
+                f'[MOVL] SLIDING: RelMovL lateral CONTÍNUO de '
+                f'{slide_lim_m*1e3:.0f} mm '
+                f'dir=({dir_world[0]:+.0f},{dir_world[1]:+.0f},0) — Z travado '
+                f'por geometria, lento a SpeedFactor '
                 f'{self._MOVL_SLIDE_SPEED_PCT}% (força varia = textura).')
             return self._movl_slide(dir_world, slide_lim_m,
                                     approach_dir_eff, p_start)
@@ -2301,7 +2415,7 @@ class TactileExplorer(Node):
                     self._set_phase('ABORTED'); return
 
                 out = self._phase_hold()
-                if out in ('force', 'stale'):
+                if out in ('force', 'stale', 'timeout'):
                     self._abort_to_home(); return
                 if out != 'ok':
                     self._set_phase('ABORTED'); return

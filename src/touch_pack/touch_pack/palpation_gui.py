@@ -151,12 +151,12 @@ _REF_T_RE = re.compile(r"t=(\d+)")
 # Faixas dos parâmetros — adequadas ao protocolo Gupta et al. 2021.
 SPEED_MIN, SPEED_MAX, SPEED_DEFAULT = 1.0,  30.0,  10.0    # mm/s
 FORCE_MIN, FORCE_MAX, FORCE_DEFAULT = 0.2,   5.0,   1.0    # N (apenas display)
-# Velocidade da DESCIDA em modo MovL (robô real), em % de SpeedFactor. A
-# descida é UM RelMovL contínuo cuja velocidade = SpeedFactor; este slider a
-# controla direto. Valores BAIXOS = descida lenta e menos overshoot no contato
-# (o robô é rápido mesmo em % baixo). No modo streaming/Gazebo o explorer usa
-# este mesmo número como velocidade de aproximação (mm/s) — inofensivo.
-APPROACH_MIN, APPROACH_MAX, APPROACH_DEFAULT = 1.0, 30.0, 1.0   # % SpeedFactor
+# Velocidade da DESCIDA no ar livre (fase PROBE), em mm/s. No modo MovL o
+# explorer emite os segmentos da descida contínua nesta cadência cartesiana;
+# no toque (> 0,05 N) dá halt imediato, alivia o pico de inércia (RELAX) e
+# fecha no setpoint em micropassos (FINE). No streaming/Gazebo é a velocidade
+# de aproximação — mesma unidade nos dois modos.
+APPROACH_MIN, APPROACH_MAX, APPROACH_DEFAULT = 1.0, 30.0, 8.0   # mm/s
 
 SPEED_FACTOR_MIN, SPEED_FACTOR_MAX, SPEED_FACTOR_DEFAULT = 1, 100, 10  # %
 # At SPEED_FACTOR_DEFAULT (10 %), Gazebo trajectory duration = 3.0 s.
@@ -171,8 +171,9 @@ SLIDE_DIST_MIN, SLIDE_DIST_MAX, SLIDE_DIST_DEFAULT = 1.0, 300.0, 50.0  # mm
 # Controle por PID de força: setpoint selecionável (máx. FORCE_SETPOINT_MAX_N);
 # a medição é cancelada se a compressão exceder FORCE_ABORT_LIMIT_N — ambos
 # vêm de constants.py (fonte única com o explorer).
-# Apenas números naturais (1..10 N) — pedido do usuário.
-FORCE_SP_MIN, FORCE_SP_MAX, FORCE_SP_DEFAULT = 1, int(FORCE_SETPOINT_MAX_N), 2
+# Resolução de 0.1 N (0.5, 0.6, 0.7 … 10 N) — pedido do usuário em 13/07.
+# O explorer aceita ≥ 0.1 N (clamp em tactile_explorer._cb_start).
+FORCE_SP_MIN, FORCE_SP_MAX, FORCE_SP_DEFAULT = 0.5, FORCE_SETPOINT_MAX_N, 2.0
 # Ganhos do PID de força em mm/s (convertidos para m/s no payload).
 # Defaults espelham o explorer: kp=0.001, ki=0.0005, kd=0 (m/s).
 PID_KP_MIN, PID_KP_MAX, PID_KP_DEFAULT = 0.0, 10.0, 1.0   # (mm/s)/N
@@ -1492,10 +1493,11 @@ class PalpationGUI(Node):
 
         self.speed_var      = tk.DoubleVar(value=_f('speed', SPEED_DEFAULT))
         self.depth_var      = tk.DoubleVar(value=_f('depth', DEPTH_DEFAULT))
-        # IntVar: força e repetições aceitam apenas números naturais —
-        # o slider faz snap para inteiro via `integer=True` no _param_row.
-        self.force_sp_var   = tk.IntVar(value=int(_f('force_sp',
-                                                     FORCE_SP_DEFAULT)))
+        # Força aceita décimos de newton (0.5, 0.6, 0.7 …) — o slider faz
+        # snap para múltiplos de 0.1 via `snap=0.1` no _param_row.
+        # Repetições seguem inteiras (`integer=True`).
+        self.force_sp_var   = tk.DoubleVar(value=_f('force_sp',
+                                                    FORCE_SP_DEFAULT))
         self.pid_kp_var     = tk.DoubleVar(value=_f('kp', PID_KP_DEFAULT))
         self.pid_ki_var     = tk.DoubleVar(value=_f('ki', PID_KI_DEFAULT))
         self.pid_kd_var     = tk.DoubleVar(value=_f('kd', PID_KD_DEFAULT))
@@ -1515,6 +1517,10 @@ class PalpationGUI(Node):
         self.hold_tol_var     = tk.DoubleVar(value=_f('hold_tol', 0.15))
         self.hold_stable_var  = tk.DoubleVar(value=_f('hold_stable', 5.0))
         self.hold_timeout_var = tk.DoubleVar(value=_f('hold_timeout', 8.0))
+        # Tetos do micro-passo quase-estático (defaults espelham o explorer:
+        # _QS_DX_MAX_M = 10 µm, _QS_DF_HARD_N = 0.3 N).
+        self.hold_dx_var      = tk.DoubleVar(value=_f('hold_dx_max', 10.0))
+        self.hold_df_var      = tk.DoubleVar(value=_f('hold_df_max', 0.3))
 
         # Seletor de modo (Toque / Deslizamento) — define quais parâmetros
         # ficam visíveis abaixo.
@@ -1523,11 +1529,11 @@ class PalpationGUI(Node):
         # Parâmetros essenciais — sempre visíveis (válidos em ambos os modos).
         self._param_row(params_card, label='Target Force (Setpoint)',
                          unit='N', var=self.force_sp_var,
-                         vmin=FORCE_SP_MIN, vmax=FORCE_SP_MAX, step=1,
-                         integer=True,
+                         vmin=FORCE_SP_MIN, vmax=FORCE_SP_MAX, step=0.1,
+                         snap=0.1,
                          hint='Compression held during descent, '
-                              'HOLD and sliding. Integer values '
-                              'only (1–10 N). Measurement aborts if '
+                              'HOLD and sliding, in 0.1 N steps '
+                              '(0.5–10 N). Measurement aborts if '
                               'it exceeds 15 N.')
         self._row_repeats = self._param_row(
                          params_card, label='Experiment Repetitions',
@@ -1573,14 +1579,17 @@ class PalpationGUI(Node):
                          hint='Maximum safe travel — the descent stops '
                               'earlier, when the Target Force is reached.')
         self._param_row(adv, label='Descent Speed',
-                         unit='%', var=self.approach_var,
+                         unit='mm/s', var=self.approach_var,
                          vmin=APPROACH_MIN, vmax=APPROACH_MAX, step=1.0,
-                         hint='Real-robot (MovL) descent speed, as SpeedFactor '
-                              '%. The descent is one continuous move at this '
-                              'speed until the Target Force is reached. LOW '
-                              'values = slow descent and less overshoot at '
-                              'contact (the arm is fast even at low %). '
-                              'Start low (1–2 %) and raise if too slow.')
+                         hint='Free-air descent speed (PROBE phase), in mm/s. '
+                              'The arm descends continuously at this rate; at '
+                              'the first force reading (> 0.05 N) it HALTS '
+                              'immediately, relieves the inertia spike by '
+                              'backing off (RELAX), then closes on the '
+                              'setpoint in 10-20 um micro-steps (FINE). '
+                              'Faster = more inertia spike to relieve; the '
+                              'committed course cap keeps it under the 12 N '
+                              'safety margin either way.')
         self._param_row(adv, label='HOLD — Band Tolerance',
                          unit='N', var=self.hold_tol_var,
                          vmin=0.05, vmax=2.0, step=0.05,
@@ -1599,6 +1608,23 @@ class PalpationGUI(Node):
                          vmin=2.0, vmax=60.0, step=1.0,
                          hint='Maximum wait for stabilization. On expiry '
                               'the experiment proceeds with a warning.')
+        self._param_row(adv, label='HOLD — Max Micro-step',
+                         unit='µm', var=self.hold_dx_var,
+                         vmin=1.0, vmax=50.0, step=1.0,
+                         hint='Absolute cap of each quasi-static correction '
+                              'step during HOLD/FINE (explorer default: '
+                              '10 µm). One step is executed per ~180 ms '
+                              'cycle, so 10 µm ≈ 0.05 mm/s effective. '
+                              'Larger = faster convergence but more force '
+                              'overshoot on stiff contact.')
+        self._param_row(adv, label='HOLD — Max ΔF per Step',
+                         unit='N', var=self.hold_df_var,
+                         vmin=0.05, vmax=1.0, step=0.05,
+                         hint='Hard cap of the projected force change per '
+                              'micro-step, boost included (explorer '
+                              'default: 0.3 N). This is what actually '
+                              'limits the step once the stiffness is '
+                              'estimated.')
 
         # ── Coluna direita: botão de início (fixado no fundo) + feedback FT ──
         # O botão é empacotado primeiro com side='bottom' para ficar visível
@@ -5096,13 +5122,14 @@ class PalpationGUI(Node):
                        else '▶  Start Palpation')
 
     def _param_row(self, parent, *, label, unit, var,
-                    vmin, vmax, step, hint='', integer=False):
+                    vmin, vmax, step, hint='', integer=False, snap=None):
         """Linha de parâmetro: label (+ⓘ tooltip) + unidade + spinbox +
         slider. O texto de ajuda vira tooltip no hover — sem ruído inline.
 
-        integer=True: aceita apenas números naturais — o ttk.Scale escreve
-        doubles na variável Tcl ao arrastar. O snap NÃO pode reescrever a
-        variável dentro do próprio trace: o Tcl suprime os demais traces
+        integer=True / snap=<res>: quantiza o valor (inteiros ou múltiplos
+        de `res`, ex.: snap=0.5 → 1.5, 2.0 …) — o ttk.Scale escreve doubles
+        arbitrários na variável Tcl ao arrastar. O snap NÃO pode reescrever
+        a variável dentro do próprio trace: o Tcl suprime os demais traces
         durante a execução de um trace, então o Spinbox nunca seria
         notificado e exibiria o valor fracionário antigo. Por isso o trace
         apenas agenda `after_idle(_snap)`: fora do contexto do trace, a
@@ -5110,14 +5137,17 @@ class PalpationGUI(Node):
         comparação é TEXTUAL (str) para também normalizar "3.0" → "3",
         que passaria ileso numa comparação numérica (3.0 == 3)."""
         row = tk.Frame(parent, bg=PANEL); row.pack(fill='x', pady=(5, 3))
-        if integer:
+        if integer or snap:
+            res = 1.0 if integer else float(snap)
             def _snap():
                 name = str(var)
                 try:
                     raw = self.root.tk.globalgetvar(name)
-                    iv = int(round(float(raw)))
-                    if str(raw) != str(iv):
-                        var.set(iv)
+                    sv = round(float(raw) / res) * res
+                    # round() limpa resíduo binário (2.5000…04 → 2.5).
+                    sv = int(round(sv)) if integer else round(sv, 6)
+                    if str(raw) != str(sv):
+                        var.set(sv)
                 except (ValueError, tk.TclError):
                     pass   # campo vazio/parcial ou widget destruído
             var.trace_add('write',
@@ -6310,6 +6340,10 @@ class PalpationGUI(Node):
                                             default=1.0)
             hold_timeout = self._clamp_var(self.hold_timeout_var, 2.0, 60.0,
                                             default=12.0)
+            hold_dx      = self._clamp_var(self.hold_dx_var, 1.0, 50.0,
+                                            default=10.0)
+            hold_df      = self._clamp_var(self.hold_df_var, 0.05, 1.0,
+                                            default=0.3)
         finally:
             self._suppressing = False
         if None in (speed, depth, force_sp, pid_kp, pid_ki, pid_kd,
@@ -6322,12 +6356,13 @@ class PalpationGUI(Node):
         # Persiste os valores em unidades da GUI — defaults da próxima sessão.
         self._save_palp_params({
             'speed': float(speed), 'depth': float(depth),
-            'force_sp': int(force_sp), 'repeats': int(repeats),
+            'force_sp': float(force_sp), 'repeats': int(repeats),
             'kp': float(pid_kp), 'ki': float(pid_ki), 'kd': float(pid_kd),
             'slide_dist': float(slide_dist), 'approach': float(approach),
             'slide_dir': self.slide_dir_var.get(),
             'hold_tol': float(hold_tol), 'hold_stable': float(hold_stable),
             'hold_timeout': float(hold_timeout),
+            'hold_dx_max': float(hold_dx), 'hold_df_max': float(hold_df),
             'mode': self.mode_var.get(),
         })
         payload = {
@@ -6348,6 +6383,8 @@ class PalpationGUI(Node):
             'hold_tol_n':         float(hold_tol),
             'hold_stable_s':      float(hold_stable),
             'hold_timeout_s':     float(hold_timeout),
+            'hold_dx_max_um':     float(hold_dx),
+            'hold_df_max_n':      float(hold_df),
             'mode':               self.mode_var.get(),
             # Home customizada: explorer leva o braço PARA CÁ antes
             # de descer. Em graus URDF, ordem joint1..joint6.
@@ -6426,6 +6463,8 @@ class PalpationGUI(Node):
         msg.hold_tol_n         = float(payload['hold_tol_n'])
         msg.hold_stable_s      = float(payload['hold_stable_s'])
         msg.hold_timeout_s     = float(payload['hold_timeout_s'])
+        msg.hold_dx_max_um     = float(payload['hold_dx_max_um'])
+        msg.hold_df_max_n      = float(payload['hold_df_max_n'])
         msg.mode               = str(payload.get('mode', 'SLIDE'))
         self._start_pub.publish(msg)
         # Quando a mão real está conectada via ECI, aciona o grip FINGER

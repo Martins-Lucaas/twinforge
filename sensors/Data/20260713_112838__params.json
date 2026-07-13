@@ -1,0 +1,25 @@
+{
+  "approach_speed_mms": 1.0,
+  "depth_mm": 60.0,
+  "force_n": 5.0,
+  "hold_stable_s": 3.0,
+  "hold_timeout_s": 5.0,
+  "hold_tol_n": 0.15000000596046448,
+  "home_deg": [
+    81.38996124267578,
+    -0.18020756542682648,
+    -150.50003051757812,
+    60.68,
+    90.0,
+    6.691046714782715
+  ],
+  "kd": 0.0,
+  "ki": 0.0,
+  "kp": 0.0,
+  "mode": "TOUCH",
+  "repeats": 10,
+  "slide_dir": "+Y",
+  "slide_dist_mm": 50.0,
+  "speed_factor_pct": 10.0,
+  "speed_mms": 5.0
+}

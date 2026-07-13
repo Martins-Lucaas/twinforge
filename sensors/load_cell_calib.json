@@ -2,8 +2,8 @@
   "slope": 0.07629081620876085,
   "intercept": 4.6435712874881574e-07,
   "zero_voltage": 4.6435712874881574e-07,
-  "voltage_scale": 3.231237322515213,
-  "voltage_offset": 0.4544,
+  "voltage_scale": 1.3413,
+  "voltage_offset": 0.190461,
   "n_points": 4,
   "points": [
     {

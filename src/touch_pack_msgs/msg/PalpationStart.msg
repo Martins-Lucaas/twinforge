@@ -25,3 +25,8 @@ float32 hold_timeout_s      # teto de espera pela estabilização (s)
 #   'TOUCH' = toque (descida → hold com força controlada → recuo, sem deslizar)
 # Vazio = 'SLIDE' (compatibilidade). Em TOUCH, `repeats` = quantidade de toques.
 string mode
+
+# Micro-passos do regulador quase-estático (DESCENDING/HOLD) —
+# 0.0 = usar o default do explorer.
+float32 hold_dx_max_um      # teto absoluto do micro-passo (µm, default 10)
+float32 hold_df_max_n       # teto DURO de ΔF projetado por passo (N, default 0.3)

@@ -22,16 +22,27 @@ static const IPAddress BCAST_IP (192, 168, 5, 255);
 // (que era ~30% no broadcast) cai para perto de zero. Se nunca recebermos um
 // hello (ou ele ficar obsoleto > HELLO_TIMEOUT_MS), caímos de volta no
 // broadcast, então o sistema funciona mesmo antes da descoberta.
+//
+// MÚLTIPLOS ASSINANTES (13/07): antes havia UM destino (o último hello
+// vencia), então dois PCs ouvindo (touch_pack + classificador no Windows)
+// ficavam alternando o stream a cada hello (~2 s de dados p/ cada um).
+// Agora cada hello ocupa/renova um slot em g_subs e o lote é enviado por
+// unicast a TODOS os assinantes frescos (2 PCs → ~200 pkt/s, tranquilo p/ o
+// link). Sem nenhum assinante fresco, cai no broadcast como antes.
 #define DISCOVERY_PORT     8090
 #define DISCOVERY_MAGIC    "FRCV"
 #define HELLO_TIMEOUT_MS   10000
+#define MAX_SUBSCRIBERS    4
 
 WiFiUDP udp;
 WiFiUDP udpRx;                       // socket de escuta do hello
 
-static IPAddress g_dest_ip   = BCAST_IP;
-static bool      g_have_dest = false;
-static uint32_t  g_last_hello_ms = 0;
+struct Subscriber {
+    IPAddress ip;
+    uint32_t  last_hello_ms;
+    bool      used;
+};
+static Subscriber g_subs[MAX_SUBSCRIBERS];
 
 // ======================================================
 // ADC — célula de carga via amplificador no GPIO 34
@@ -176,19 +187,34 @@ static void wifi_connect()
 
 // Atende o "hello" do force_receiver (auto-descoberta). Não-bloqueante: lê
 // todos os datagramas pendentes na porta de descoberta e, se a tag bater,
-// grava o IP do remetente como destino unicast da telemetria.
+// renova o slot do remetente em g_subs (ou ocupa um livre/expirado — na
+// falta, rouba o mais antigo).
 static void discovery_poll()
 {
     int psize;
     while ((psize = udpRx.parsePacket()) > 0) {
         char buf[8] = {0};
         int n = udpRx.read((uint8_t*)buf, sizeof(buf) - 1);
-        if (n >= (int)sizeof(DISCOVERY_MAGIC) - 1 &&
-            strncmp(buf, DISCOVERY_MAGIC, sizeof(DISCOVERY_MAGIC) - 1) == 0) {
-            g_dest_ip       = udpRx.remoteIP();
-            g_have_dest     = true;
-            g_last_hello_ms = millis();
+        if (n < (int)sizeof(DISCOVERY_MAGIC) - 1 ||
+            strncmp(buf, DISCOVERY_MAGIC, sizeof(DISCOVERY_MAGIC) - 1) != 0)
+            continue;
+
+        IPAddress src = udpRx.remoteIP();
+        uint32_t  now = millis();
+        int slot = -1, oldest = 0;
+        for (int i = 0; i < MAX_SUBSCRIBERS; i++) {
+            if (g_subs[i].used && g_subs[i].ip == src) { slot = i; break; }
+            if (!g_subs[i].used ||
+                now - g_subs[i].last_hello_ms >= HELLO_TIMEOUT_MS) {
+                if (slot < 0) slot = i;      // 1º livre/expirado
+            }
+            if (now - g_subs[i].last_hello_ms >
+                now - g_subs[oldest].last_hello_ms) oldest = i;
         }
+        if (slot < 0) slot = oldest;         // lotado: rouba o mais antigo
+        g_subs[slot].ip            = src;
+        g_subs[slot].last_hello_ms = now;
+        g_subs[slot].used          = true;
     }
 }
 
@@ -233,20 +259,32 @@ void setup()
     last_sample_us = micros();
 }
 
-// Monta o datagrama com as amostras acumuladas e o envia (unicast se o receiver
-// foi descoberto; broadcast no fallback). Espelha o formato lido pelo
-// force_receiver (LOAD_CELL_SAMPLE_FMT '<IIf', LOAD_CELL_BATCH_N amostras).
+// Monta o datagrama com as amostras acumuladas e o envia por unicast a CADA
+// assinante fresco (broadcast no fallback, se não houver nenhum). Espelha o
+// formato lido pelo force_receiver (LOAD_CELL_SAMPLE_FMT '<IIf',
+// LOAD_CELL_BATCH_N amostras).
 static void flush_batch()
 {
     if (batch_count == 0) return;
-    // millis() (não micros()/1000): g_last_hello_ms é medido em millis(); os
+    // millis() (não micros()/1000): last_hello_ms é medido em millis(); os
     // dois têm wrap diferente e não são comparáveis se misturados.
-    bool fresh = g_have_dest && (millis() - g_last_hello_ms < HELLO_TIMEOUT_MS);
-    IPAddress dst = fresh ? g_dest_ip : BCAST_IP;
-    udp.beginPacket(dst, UDP_PORT);
-    udp.write(reinterpret_cast<const uint8_t*>(batch),
-              batch_count * sizeof(Sample));
-    udp.endPacket();
+    uint32_t now = millis();
+    bool sent = false;
+    for (int i = 0; i < MAX_SUBSCRIBERS; i++) {
+        if (!g_subs[i].used ||
+            now - g_subs[i].last_hello_ms >= HELLO_TIMEOUT_MS) continue;
+        udp.beginPacket(g_subs[i].ip, UDP_PORT);
+        udp.write(reinterpret_cast<const uint8_t*>(batch),
+                  batch_count * sizeof(Sample));
+        udp.endPacket();
+        sent = true;
+    }
+    if (!sent) {
+        udp.beginPacket(BCAST_IP, UDP_PORT);
+        udp.write(reinterpret_cast<const uint8_t*>(batch),
+                  batch_count * sizeof(Sample));
+        udp.endPacket();
+    }
     batch_count = 0;
 }
 
