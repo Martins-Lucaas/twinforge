@@ -1,0 +1,117 @@
+{
+  "cycles": {
+    "1": {
+      "DESCENDING": {
+        "duration_s": 10.15,
+        "max_n": 2.455,
+        "mean_n": 0.661,
+        "min_n": -0.0,
+        "n_samples": 1065,
+        "overshoot_n": 0.455,
+        "std_n": 0.875,
+        "target_n": 2.0
+      },
+      "HOLD": {
+        "duration_s": 9.09,
+        "final_window": {
+          "max_n": 2.004,
+          "mean_n": 1.953,
+          "min_n": 1.891,
+          "n_samples": 121,
+          "std_n": 0.026
+        },
+        "max_n": 2.014,
+        "mean_n": 1.936,
+        "min_n": 1.833,
+        "n_samples": 1014,
+        "std_n": 0.033,
+        "target_n": 2.0
+      }
+    },
+    "2": {
+      "DESCENDING": {
+        "duration_s": 10.55,
+        "max_n": 2.802,
+        "mean_n": 0.626,
+        "min_n": -0.0,
+        "n_samples": 1048,
+        "overshoot_n": 0.802,
+        "std_n": 0.836,
+        "target_n": 2.0
+      },
+      "HOLD": {
+        "duration_s": 8.82,
+        "final_window": {
+          "max_n": 2.006,
+          "mean_n": 1.948,
+          "min_n": 1.841,
+          "n_samples": 97,
+          "std_n": 0.032
+        },
+        "max_n": 2.006,
+        "mean_n": 1.933,
+        "min_n": 1.767,
+        "n_samples": 957,
+        "std_n": 0.034,
+        "target_n": 2.0
+      }
+    },
+    "3": {
+      "DESCENDING": {
+        "duration_s": 14.45,
+        "max_n": 2.333,
+        "mean_n": 0.872,
+        "min_n": -0.0,
+        "n_samples": 1523,
+        "overshoot_n": 0.333,
+        "std_n": 0.858,
+        "target_n": 2.0
+      },
+      "HOLD": {
+        "duration_s": 0.49,
+        "final_window": {
+          "max_n": 1.942,
+          "mean_n": 1.913,
+          "min_n": 1.886,
+          "n_samples": 30,
+          "std_n": 0.013
+        },
+        "max_n": 1.942,
+        "mean_n": 1.913,
+        "min_n": 1.886,
+        "n_samples": 30,
+        "std_n": 0.013,
+        "target_n": 2.0
+      }
+    }
+  },
+  "cycles_detected": 3,
+  "duration_s": 59.98,
+  "n_samples": 6181,
+  "params": {
+    "approach_speed_mms": 1.0,
+    "depth_mm": 60.0,
+    "force_n": 2.0,
+    "hold_stable_s": 3.0,
+    "hold_timeout_s": 3.0,
+    "hold_tol_n": 0.15000000596046448,
+    "home_deg": [
+      81.49978637695314,
+      0.04068232700228691,
+      -150.71835327148438,
+      60.68,
+      90.0,
+      6.689546585083008
+    ],
+    "kd": 0.0,
+    "ki": 0.0,
+    "kp": 0.0,
+    "mode": "TOUCH",
+    "repeats": 3,
+    "slide_dir": "+Y",
+    "slide_dist_mm": 50.0,
+    "speed_factor_pct": 10.0,
+    "speed_mms": 5.0
+  },
+  "target_force_n": 2.0
+}

@@ -119,8 +119,9 @@ const float R2 = 98600.0f;             // resistor físico (perna baixa do divis
 const float V_GAIN = (R1 + R2) / R2;   // = 1.3413 (MEÇA V_amp/v_adc p/ reaferir)
 #endif
 
-// Offset DC do amplificador em repouso (sem carga). Com a célula MK CSA/ZL-100
-// a saída repousa em ~0.4544 V. Subtraímos para que a tensão enviada seja ~0
+// Offset DC do amplificador em repouso (sem carga). Com a célula de carga de
+// 5 kg (saída nominal 1.0 mV/V) a saída repousava em ~0.4544 V numa montagem
+// anterior. Subtraímos para que a tensão enviada seja ~0
 // sem força. Medido em produção (DIAG_RAW=0) sobrava +0.00446 V de resíduo no
 // repouso → somado (0.4544 + 0.00446 = 0.45886). Re-aferido em 2026-06-21 com a
 // célula em repouso (porta 8080): ainda sobravam +0.001416 V → somado de novo
