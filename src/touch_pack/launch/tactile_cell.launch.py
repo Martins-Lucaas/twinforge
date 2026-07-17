@@ -329,74 +329,66 @@ def _build_touch_tool_suffix(cr10_urdf: str, touch_pack_share: str,
                               arm_gz: str) -> str:
     """Injeta a célula de carga 100 kg montada + TouchTool Square 20×20 mm + tcp_link no CR10.
 
-    17/07/2026: a célula física voltou a ser a de 100 kg, montada entre OS
-    MESMOS acopladores impressos — a cadeia, os offsets e o TCP são os mesmos
-    da montagem anterior; só o corpo da célula difere. Como não há STL da
-    montagem 100 kg, o visual é construído por PRIMITIVAS: disco acoplador do
-    flange (⌀63,5 mm, do CAD Acoplador_CelulaDeCarga_Uniaxial.f3d) + barra
-    100 kg (bolso do acoplador: 26 mm de largura) + disco da ferramenta.
-    Havendo um STL exportado do Fusion, basta trocar os <visual> do
-    force_sensor_link por um <mesh> (como era com CelulaDeCarga_5kg_Montagem).
+    17/07/2026: a célula física é uma CSA/ZL tipo S de 100 kg (dimensional do
+    fabricante, linha 100 kg: A=50,8 largura × B=76,2 altura × C=19,1 mm de
+    espessura, rosca M12×1,75 nos dois lados), montada AXIALMENTE entre os
+    acopladores impressos (CAD Acoplador_CelulaDeCarga_Uniaxial.f3d, ⌀63,5 mm)
+    — a montagem cantilever com offset lateral era da barra 5 kg antiga e SAIU.
+    Os acopladores têm recuos que encaixam as faces superior/inferior da célula
+    e alojam o parafuso M12 (nada de rosca exposta). O mesh
+    CelulaDeCarga_100kg_Montagem.stl é gerado por
+    scripts/gen_loadcell_100kg_assembly_stl.py.
 
-    A montagem (placa-robô + barra single-point + placa touch_tool) é um único
-    corpo (force_sensor_link). A placa-robô assenta plana no flange (Link6) e a
-    barra fica em cantilever: o Rz(−90°) da junta de fixação aponta a barra
-    (mesh +X) para −Link6_y. O touch_tool monta na placa superior — deslocada
-    −55 mm em Link6_y e +28 mm em +Link6_z.
+    A montagem (acoplador-robô + célula S + acoplador-tool) é um único corpo
+    (force_sensor_link), coaxial ao flange. Pilha no eixo Z do Link6:
+      0…8 acoplador-robô · 8…84,2 célula S · 84,2…92,2 acoplador-tool
 
-    Frame do mesh (recentrado): origem no centro da placa-robô, face inferior em
-    Z=0, barra ao longo de +X, placa do touch_tool em (X=+55 mm, topo Z=+28 mm).
+    Frame do mesh: origem no centro do acoplador-robô, face inferior em Z=0.
 
-    Cadeia (no frame do mesh, antes do Rz−90°):
-      force_sensor_link (placa-robô no flange) → touch_tool (+55,0,+28 mm)
-      → tcp_link (+114.5 mm no eixo do probe)
-    TCP resultante no frame Link6: (0, −55, +142.5) mm.
+    Cadeia: force_sensor_link (no flange) → touch_tool (0,0,+92,2 mm)
+      → tcp_link (+114,5 mm no eixo do probe)
+    TCP resultante no frame Link6: (0, 0, +206,7 mm) — espelhado em
+    kinematics.T_TOUCH_TOOL_ATTACH.
     """
     tool_mesh     = os.path.join(touch_pack_share, 'meshes', 'touch_tool_square_20x20.stl')
+    assembly_mesh = os.path.join(
+        touch_pack_share, 'meshes', 'CelulaDeCarga_100kg_Montagem.stl')
 
     tool_snippet = f'''
-    <!-- ── Célula de carga 100 kg montada (placa-robô + barra + placa tool).
-         Visual por primitivas (não há STL da montagem 100 kg): discos
-         acopladores ⌀63,5 mm (CAD Acoplador_CelulaDeCarga_Uniaxial) e barra
-         100 kg de 26 mm de largura ocupando o bolso do acoplador — bem mais
-         robusta que a barra 5 kg (12,7 mm) que aparecia antes no Gazebo.
-         Mesmo frame do mesh antigo: origem no centro da placa-robô, face
-         inferior em Z=0, barra em +X, placa tool em (X=+55, topo Z=+28).
+    <!-- ── Célula de carga 100 kg montada (CSA/ZL tipo S, axial).
+         Mesh gerado por scripts/gen_loadcell_100kg_assembly_stl.py:
+         acopladores ⌀63,5 mm (CAD Acoplador_CelulaDeCarga_Uniaxial, com
+         recuos que encaixam as faces da célula e alojam o parafuso M12) +
+         célula S 50,8×19,1×76,2 mm — nada da barra 5 kg.
+         Frame: origem no centro do acoplador-robô, face inferior em Z=0,
+         pilha coaxial a +Z até o topo do acoplador-tool em Z=+92,2 mm.
          Massa/inércia: estimativa — pesar a montagem real e ajustar. ── -->
     <link name="force_sensor_link">
       <inertial>
-        <origin xyz="0.030 0 0.014" rpy="0 0 0"/>
-        <mass value="0.500"/>
-        <inertia ixx="2.4e-4" ixy="0.0" ixz="0.0"
-                 iyy="6.8e-4" iyz="0.0" izz="8.6e-4"/>
+        <origin xyz="0 0 0.046" rpy="0 0 0"/>
+        <mass value="0.800"/>
+        <inertia ixx="6.9e-4" ixy="0.0" ixz="0.0"
+                 iyy="8.4e-4" iyz="0.0" izz="2.0e-4"/>
       </inertial>
-      <visual name="vis_robot_plate">
-        <origin xyz="0 0 0.004" rpy="0 0 0"/>
-        <geometry><cylinder radius="0.03175" length="0.008"/></geometry>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="file://{assembly_mesh}" scale="0.001 0.001 0.001"/>
+        </geometry>
         <material name="silver">
           <color rgba="0.82 0.82 0.88 1.0"/>
         </material>
-      </visual>
-      <visual name="vis_loadcell_100kg">
-        <origin xyz="0.0275 0 0.014" rpy="0 0 0"/>
-        <geometry><box size="0.080 0.026 0.012"/></geometry>
-        <material name="silver"/>
-      </visual>
-      <visual name="vis_tool_plate">
-        <origin xyz="0.055 0 0.024" rpy="0 0 0"/>
-        <geometry><cylinder radius="0.03175" length="0.008"/></geometry>
-        <material name="silver"/>
       </visual>
       <collision name="col_robot_plate">
         <origin xyz="0 0 0.004" rpy="0 0 0"/>
         <geometry><cylinder radius="0.03175" length="0.008"/></geometry>
       </collision>
-      <collision name="col_loadcell_bar">
-        <origin xyz="0.0275 0 0.014" rpy="0 0 0"/>
-        <geometry><box size="0.080 0.026 0.012"/></geometry>
+      <collision name="col_loadcell_s">
+        <origin xyz="0 0 0.0461" rpy="0 0 0"/>
+        <geometry><box size="0.0508 0.0191 0.0762"/></geometry>
       </collision>
       <collision name="col_tool_plate">
-        <origin xyz="0.055 0 0.024" rpy="0 0 0"/>
+        <origin xyz="0 0 0.0882" rpy="0 0 0"/>
         <geometry><cylinder radius="0.03175" length="0.008"/></geometry>
       </collision>
     </link>
@@ -427,18 +419,18 @@ def _build_touch_tool_suffix(cr10_urdf: str, touch_pack_share: str,
       </collision>
     </link>
     <link name="tcp_link"/>
-    <!-- placa-robô assenta plana no flange; Rz−90° aponta a barra p/ −Link6_y -->
+    <!-- acoplador-robô assenta plano no flange; montagem coaxial ao Link6
+         (o Rz−90° da era cantilever saiu) -->
     <joint name="force_sensor_attach" type="fixed">
       <parent link="Link6"/>
       <child link="force_sensor_link"/>
-      <origin xyz="0 0 0" rpy="0 0 -1.5708"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
     </joint>
-    <!-- touch tool na placa superior (X=+55 mm, topo Z=+28 mm no frame do mesh);
-         rpy Rz+90° desfaz o Rz−90° da montagem → tool/tcp alinhados ao Link6 -->
+    <!-- touch tool no topo do acoplador-tool (Z=+92,2 mm), alinhado ao Link6 -->
     <joint name="touch_tool_attach" type="fixed">
       <parent link="force_sensor_link"/>
       <child link="touch_tool_link"/>
-      <origin xyz="0.055 0 0.028" rpy="0 0 1.5708"/>
+      <origin xyz="0 0 0.0922" rpy="0 0 0"/>
     </joint>
     <joint name="tcp_alias_joint" type="fixed">
       <parent link="touch_tool_link"/>

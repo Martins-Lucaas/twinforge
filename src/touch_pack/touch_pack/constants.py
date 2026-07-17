@@ -34,12 +34,13 @@ FORCE_ABORT_LIMIT_N = 15.0
 FORCE_SETPOINT_MAX_N = 10.0
 
 # ── Identidade da célula de carga vigente ────────────────────────────────────
-# 17/07/2026: célula de 100 kg montada entre OS MESMOS acopladores impressos
-# da montagem anterior (a barra de 5 kg saiu). O TCP não muda
-# (kinematics.T_TOUCH_TOOL_ATTACH) e o firmware também não — ele só transmite
-# a tensão da ponte. O que muda é a SENSIBILIDADE (~20× menos V por N):
-# slope/intercept pertencem à CÉLULA, então toda troca exige recalibrar na
-# aba Calibration da GUI (a assinatura voltage_scale/offset já força isso).
+# 17/07/2026: célula CSA/ZL tipo S de 100 kg (50,8×19,1×76,2 mm, M12×1,75),
+# montada AXIALMENTE entre os acopladores impressos — a barra 5 kg cantilever
+# saiu e o TCP MUDOU junto: agora é coaxial ao flange, (0, 0, +206,7) mm
+# (kinematics.T_TOUCH_TOOL_ATTACH). O firmware não muda — só transmite a
+# tensão da ponte. A SENSIBILIDADE muda (~20× menos V por N): slope/intercept
+# pertencem à CÉLULA, então toda troca exige recalibrar na aba Calibration da
+# GUI (a assinatura voltage_scale/offset já força isso).
 LOAD_CELL_RATED_KG = 100.0
 LOAD_CELL_RATED_N  = LOAD_CELL_RATED_KG * 9.80665   # ≈ 980,7 N
 

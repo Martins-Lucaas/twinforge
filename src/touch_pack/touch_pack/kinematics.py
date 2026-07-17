@@ -75,22 +75,21 @@ T_HAND_ATTACH = np.array([
     [0.0,  0.0,  0.0,  1.00000],
 ], dtype=float)
 
-# TCP do TouchTool Square 20×20 mm na célula de carga montada entre os
-# acopladores impressos (desde 17/07/2026 a célula é a de 100 kg; os
-# acopladores e offsets são OS MESMOS da montagem 5 kg — mesh
-# CelulaDeCarga_5kg_Montagem — então o TCP não muda).
-# A célula é single-point/cantilever: a placa-robô
-# assenta plana no flange (Link6) e a barra cantilevera em −Link6_y, levando a
-# placa do touch_tool a −55 mm em Y e +28 mm em Z. O touch_tool monta nessa placa
-# apontando +Link6_z e seu probe estende +114.5 mm → TCP em (0, −55, +142.5) mm.
-# A orientação do TCP é mantida idêntica ao Link6 (o Rz+90° da junta touch_tool
-# desfaz o Rz−90° da montagem), logo o transform é translação pura.
-# NB: o offset lateral em Y é tratado integralmente pela FK/IK (forward_kinematics
-# e jacobian usam T_end completo); só o _geometric_guess o ignora no seed.
+# TCP do TouchTool Square 20×20 mm na célula de carga CSA/ZL tipo S de 100 kg
+# (desde 17/07/2026), montada AXIALMENTE entre os acopladores impressos
+# (Acoplador_CelulaDeCarga_Uniaxial, rosca M12×1,75). A montagem cantilever
+# com offset lateral de −55 mm era da barra 5 kg antiga e SAIU.
+# Os acopladores têm recuos que encaixam as faces da célula e alojam o
+# parafuso M12 (sem rosca exposta). Pilha coaxial ao Link6_z: acoplador-robô 8
+# + célula S 76,2 + acoplador-tool 8 = 92,2 mm; o probe do touch_tool estende
+# +114,5 mm → TCP em (0, 0, +206,7 mm). Orientação idêntica ao Link6 →
+# transform é translação pura. NB: conferir a pilha real na bancada; qualquer
+# ajuste vale aqui E no launch (touch_tool_attach) +
+# scripts/gen_loadcell_100kg_assembly_stl.py.
 T_TOUCH_TOOL_ATTACH = np.array([
     [1.0,  0.0,  0.0,  0.0000],
-    [0.0,  1.0,  0.0, -0.0550],  # −55 mm — cantilever da barra em −Link6_y
-    [0.0,  0.0,  1.0,  0.1425],  # +142.5 mm — placa tool (+28) + probe (+114.5)
+    [0.0,  1.0,  0.0,  0.0000],
+    [0.0,  0.0,  1.0,  0.2067],  # +206.7 mm — pilha axial (92.2) + probe (114.5)
     [0.0,  0.0,  0.0,  1.0000],
 ], dtype=float)
 
