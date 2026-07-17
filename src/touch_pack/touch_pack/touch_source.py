@@ -31,6 +31,7 @@ from .constants import (
     TOUCH_PAYLOAD_FMT,
     TOUCH_UDP_BROADCAST_IP,
     TOUCH_FRAME_UDP_PORT,
+    LOAD_CELL_USB_VID,
 )
 
 try:
@@ -74,12 +75,17 @@ RE_TOTAL = re.compile(
 
 
 def detect_serial_port() -> Optional[str]:
-    """Primeira porta USB/ACM disponível (STM32 via USB-CDC)."""
+    """Primeira porta USB/ACM disponível (STM32 via USB-CDC).
+
+    Exclui o VID Espressif: é o XIAO ESP32S3 da célula de carga, também
+    USB-CDC e possivelmente no MESMO PC (fallback serial da célula) — sem o
+    filtro o auto-detect do toque podia abrir a porta da célula."""
     if not _SERIAL_OK:
         return None
     candidates = [
         p.device for p in list_ports.comports()
-        if "ACM" in p.device or "USB" in p.device
+        if ("ACM" in p.device or "USB" in p.device)
+        and p.vid != LOAD_CELL_USB_VID
     ]
     return candidates[0] if candidates else None
 

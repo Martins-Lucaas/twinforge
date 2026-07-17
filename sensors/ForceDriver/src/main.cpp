@@ -2,40 +2,40 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
+#include "HX711.h"
 
-// ======================================================
-// WIFI — rede local do laboratório
-// ======================================================
+// Placa: Seeed Studio XIAO ESP32S3 + HX711 (célula de carga).
+// Antena externa U.FL OBRIGATÓRIA — sem ela o WiFi não conecta.
+
+// Modo de teste: compile com -DSERIAL_TEST=1 (env serial_test). Pula
+// WiFi/OTA/UDP e imprime counts crus + v_sensor no monitor USB (115200).
+#ifndef SERIAL_TEST
+#define SERIAL_TEST 0
+#endif
+
+// ── WiFi — rede do laboratório ──────────────────────────────────────────
+// Ao trocar de ambiente, mudar ssid/password e os 4 IPs abaixo JUNTO com
+// LOAD_CELL_ESP_IP (constants.py) e upload_port do [env:ota] (platformio.ini).
+// Em casa: "Martins 6" / "17031998", rede 192.168.6.0/24, ESP .6.105.
 const char* ssid     = "Ender 3 V2 - coleta";
 const char* password = "Biolabeb0608";
 
 static const IPAddress LOCAL_IP (192, 168, 5, 105);
 static const IPAddress GATEWAY  (192, 168, 5,   1);
 static const IPAddress SUBNET   (255, 255, 255,  0);
-
 static const IPAddress BCAST_IP (192, 168, 5, 255);
 #define UDP_PORT 8080
 
-// Auto-descoberta: o force_receiver manda um "hello" (tag 'FRCV') para
-// DISCOVERY_PORT; gravamos o IP do remetente e passamos a enviar a telemetria
-// por UNICAST de volta — o WiFi reconhece/retransmite unicast, então a perda
-// (que era ~30% no broadcast) cai para perto de zero. Se nunca recebermos um
-// hello (ou ele ficar obsoleto > HELLO_TIMEOUT_MS), caímos de volta no
-// broadcast, então o sistema funciona mesmo antes da descoberta.
-//
-// MÚLTIPLOS ASSINANTES (13/07): antes havia UM destino (o último hello
-// vencia), então dois PCs ouvindo (touch_pack + classificador no Windows)
-// ficavam alternando o stream a cada hello (~2 s de dados p/ cada um).
-// Agora cada hello ocupa/renova um slot em g_subs e o lote é enviado por
-// unicast a TODOS os assinantes frescos (2 PCs → ~200 pkt/s, tranquilo p/ o
-// link). Sem nenhum assinante fresco, cai no broadcast como antes.
+// Auto-descoberta: receptores mandam "FRCV" para DISCOVERY_PORT a cada ~2 s;
+// cada um ocupa/renova um slot em g_subs e recebe a telemetria por UNICAST
+// (broadcast em WiFi perde ~30%). Sem assinante fresco, cai no broadcast.
 #define DISCOVERY_PORT     8090
 #define DISCOVERY_MAGIC    "FRCV"
 #define HELLO_TIMEOUT_MS   10000
 #define MAX_SUBSCRIBERS    4
 
 WiFiUDP udp;
-WiFiUDP udpRx;                       // socket de escuta do hello
+WiFiUDP udpRx;                       // escuta do hello
 
 struct Subscriber {
     IPAddress ip;
@@ -44,141 +44,49 @@ struct Subscriber {
 };
 static Subscriber g_subs[MAX_SUBSCRIBERS];
 
-// ======================================================
-// ADC — célula de carga via amplificador no GPIO 34
-// ======================================================
-#define ADC_PIN       34
+// ── HX711 ───────────────────────────────────────────────────────────────
+// DT → D1 (GPIO2), SCK → D3 (GPIO4). Não mover o DOUT para GPIO0/3/45/46:
+// são strapping pins do ESP32-S3 (GPIO3 = D2 do XIAO!).
+#define HX_DOUT_PIN  2
+#define HX_SCK_PIN   4
+#define HX_GAIN      128     // canal A
 
-// Oversampling CONTÍNUO com analogReadMilliVolts() (mV calibrados pela eFuse).
-//
-// NOTA: tentamos analogRead() cru, mas nesta placa/core ele retornava 0 (pino
-// grudava no piso) — voltamos para analogReadMilliVolts(), que lê certo e
-// ainda lineariza o ADC pela curva de fábrica. Ele devolve mV INTEIROS (passo
-// de 1 mV), MAS acumulamos centenas de leituras por tick em ponto flutuante:
-// como o ruído do ADC é > 1 LSB, ele funciona como dither e a média recupera
-// frações de mV (resolução efetiva ~0.1-0.2 mV no pino → bem abaixo do passo
-// de 1 mV). É a forma mais barata e confiável de aumentar a resolução.
-static uint64_t adc_sum_mv = 0;   // soma de mV calibrados
-static uint32_t adc_count  = 0;
+static HX711 hx;
 
-// DIAGNÓSTICO: se 1, envia a tensão CRUA do pino (V, média do oversampling,
-// SEM ganho/offset/mediana/EMA). Nesse modo o repouso aparece em ~0.142 V
-// (= V_OFFSET / V_GAIN, o offset do amp visto DEPOIS do divisor), que é o
-// "offset alto" observado na GUI. Em PRODUÇÃO (0) o firmware subtrai V_OFFSET
-// e filtra, então v_sensor sai ~0 sem carga e usa a escala inteira (5 N em
-// 1000 N ≈ 50 mV no domínio do amp, muito acima do passo do ADC). Só volte a
-// 1 para diagnosticar o hardware.
-#define DIAG_RAW  0
+// v_sensor = counts·AVDD/2²⁴ = tensão da ponte já ×PGA(128). HX_VREF é o
+// AVDD do módulo (3V3 do XIAO); erro aqui é só escala global, absorvida
+// pela calibração da GUI. MANTER SINCRONIZADO com LC_FW_VOLTAGE_SCALE /
+// LC_FW_VOLTAGE_OFFSET do constants.py.
+const float HX_VREF     = 3.3f;
+const float COUNTS_TO_V = HX_VREF / 16777216.0f;
+const float V_OFFSET    = 0.0f;   // zero da ponte deriva; a tare da GUI cuida
 
-// FILTRAGEM MOVIDA PARA O PC (force_receiver_node). A 1 kHz o filtro pesado
-// (mediana + EMA dupla) é definido em AMOSTRAS, então teria de ser reajustado a
-// cada mudança de taxa e exigiria reflashar o ESP para qualquer tweak. Aqui
-// fica só o filtro LEVE — a média do oversampling do ADC dentro de cada janela
-// de 1 ms (ver loop()) — que é praticamente de graça e dá o dither sub-mV. O
-// force_receiver aplica mediana + EMA em software, onde é trivial reajustar.
-// ======================================================
-// RECONSTRUÇÃO DA SAÍDA DO AMPLIFICADOR (V_GAIN) — CALIBRADO POR MEDIÇÃO
-// ======================================================
-// O firmware lê a tensão no pino do ADC (v_adc, DEPOIS do divisor) e reconstrói
-// a saída do amplificador: v_sensor = v_adc * V_GAIN. É v_sensor que trafega na
-// rede e aparece como "LC Voltage" na GUI — logo v_sensor DEVE bater com o que
-// você mede com o multímetro na saída do amp.
-//
-// >>> O divisor É modelado por R1/R2, mas AFERIDO pelo ADC — não pelo nominal. <<<
-// V_GAIN = (R1+R2)/R2 reconstrói a saída do amp a partir do que o ADC lê.
-//
-// ARMADILHA (é o que gerou os ganhos errados anteriores): NÃO meça o pino do ADC
-// com multímetro para achar o ganho. O ADC do ESP32 tem impedância de entrada
-// FINITA, que entra em paralelo com R2 e carrega o divisor — a tensão que o
-// multímetro (alta-Z) lê no pino NÃO é a que o ADC converte. Ex.: multímetro no
-// pino deu 0.178 V, mas o ADC na prática reporta ~0.257 V. Calibrar pelo pino
-// (0.178) deu V_GAIN=1.9438 e a GUI foi para ~0.5 V; o certo é calibrar pelo
-// próprio ADC.
-//
-// Como reaferir (SÓ a razão R1/R2 importa — não dá p/ recuperar os dois físicos,
-// e o R1 aqui é EFETIVO, já embute o carregamento do ADC, ≠ resistor da placa):
-//   1) multímetro na SAÍDA do amp com um peso parado → V_amp   (ex.: 0.345 V)
-//   2) leia v_adc que o ADC reporta = (Raw Voltage da GUI) / (V_GAIN atual)
-//   3) V_GAIN_alvo = V_amp / v_adc  →  ajuste R1 até (R1+R2)/R2 = V_GAIN_alvo
-// Aferido 2026-07-10, 500 g: V_amp=0.345 V, v_adc=0.5/1.9438=0.2572 V →
-// V_GAIN=1.341. Com R2=98600 fixo, R1=33650 dá (33650+98600)/98600=1.3413 e a
-// GUI mostra 0.2572·1.3413 = 0.345 V, batendo com o amp.
-// Depois de mudar isto é OBRIGATÓRIO refazer a calibração na GUI (slope/intercept
-// dependem desta escala). Manter constants.py (LC_FW_VOLTAGE_SCALE) sincronizado.
-//
-// SEM_DIVISOR: a saída do amp em 0..2520 g é 0.076..2.034 V, que cabe INTEIRA nos
-// 0..3.3 V do ADC — o divisor é desnecessário e só joga resolução fora e injeta
-// ruído (~80 mV pp no pino). O IDEAL é remover o divisor (amp direto no GPIO34) e
-// pôr SEM_DIVISOR=1 → V_GAIN=1.0 e v_sensor = a própria saída do amp.
-#define SEM_DIVISOR 0
-#if SEM_DIVISOR
-const float V_GAIN = 1.0f;             // amp direto no GPIO34 (sem divisor)
-#else
-const float R1 = 33650.0f;             // EFETIVO (aferido p/ V_GAIN=1.341), ≠ nominal
-const float R2 = 98600.0f;             // resistor físico (perna baixa do divisor)
-const float V_GAIN = (R1 + R2) / R2;   // = 1.3413 (MEÇA V_amp/v_adc p/ reaferir)
-#endif
-
-// Offset DC do amplificador em repouso (sem carga). Com a célula de carga de
-// 5 kg (saída nominal 1.0 mV/V) a saída repousava em ~0.4544 V numa montagem
-// anterior. Subtraímos para que a tensão enviada seja ~0
-// sem força. Medido em produção (DIAG_RAW=0) sobrava +0.00446 V de resíduo no
-// repouso → somado (0.4544 + 0.00446 = 0.45886). Re-aferido em 2026-06-21 com a
-// célula em repouso (porta 8080): ainda sobravam +0.001416 V → somado de novo
-// (0.45886 + 0.001416 = 0.460276), agora o repouso sai em 0. Se mudar de
-// célula/amp ou houver deriva térmica, reajuste (a GUI ainda faz tare por cima).
-// Aferido 2026-07-10 com a célula de 5 kg EM REPOUSO (sem carga): o v_sensor
-// repousava em ~0.190461 V. Subtraímos esse valor para o repouso sair em ~0.
-// ATENÇÃO: este offset DERIVA (já foi visto pular 0.077 → 0.190 entre sessões,
-// por temperatura/pré-carga da montagem) — se o repouso não sair em 0 depois de
-// regravar, reaferir aqui, OU simplesmente usar a tare da GUI, que zera por cima
-// sem reflashar. Manter constants.py (LC_FW_VOLTAGE_OFFSET) sincronizado.
-const float V_OFFSET = 0.190461f;
-
-// ======================================================
-// TEMPORIZAÇÃO — 1 kHz não-bloqueante + ENVIO EM LOTE
-// ======================================================
-// Amostra a cada 1 ms (1 kHz). Mas NÃO manda um datagrama por amostra: 1000
-// pacotes minúsculos/s estouram o airtime do WiFi e a perda dispara (o
-// histórico mostra 5–37% já a 100 Hz). Em vez disso agrupa BATCH_N amostras
-// por datagrama → ~100 pacotes/s, taxa que o link sustenta. Cada amostra leva
-// seu próprio seq e t_us (micros), então o receiver reconstrói o stream de
-// 1 kHz, detecta perda por amostra e coloca tudo numa grade temporal comum.
-#define SAMPLE_INTERVAL_US 1000          // 1 ms → 1 kHz
-#define BATCH_N            10            // amostras por datagrama → 100 pkt/s
-static uint32_t last_sample_us = 0;
-
+// Amostra na rede: little-endian '<IIf' (12 B), 1 por datagrama — formato
+// espelhado no force_receiver e no classificador externo. A taxa é ditada
+// pelo pino RATE do HX711 (GND = 10 Hz, VDD = 80 Hz); o receptor mede a
+// taxa real pelo t_us.
 struct __attribute__((packed)) Sample {
-    uint32_t seq;       // contador por AMOSTRA
-    uint32_t t_us;      // micros() no instante da amostra (relógio de sync)
-    float    v_sensor;  // tensão calibrada, só com a média do oversampling
+    uint32_t seq;
+    uint32_t t_us;      // micros() na leitura (relógio de sincronização)
+    float    v_sensor;
 };
 
-static Sample   batch[BATCH_N];
-static uint8_t  batch_count = 0;
+static Sample   sample_out;
 static uint32_t tx_seq = 0;
 
 const uint32_t WIFI_RETRY_MS = 3000;
 static uint32_t last_wifi_retry_ms = 0;
 
-// Conexão inicial — só roda no setup(). Bloquear no boot é aceitável (não
-// há amostragem ainda); na operação a reconexão é feita por wifi_kick().
+// Conexão inicial (bloqueante, só no boot); em operação usa wifi_kick().
 static void wifi_connect()
 {
     WiFi.mode(WIFI_STA);
     WiFi.config(LOCAL_IP, GATEWAY, SUBNET);
     WiFi.setAutoReconnect(true);
     WiFi.persistent(false);
-    // Desliga o modem-sleep: por padrão o ESP32 dorme o rádio entre DTIMs do AP
-    // e atrasa/derruba pacotes — a 100 Hz isso aparecia como perda de UDP de
-    // 5–37% no force_receiver. Sem sleep o rádio fica sempre ativo (consome mais
-    // ~80 mA, irrelevante com alimentação USB/bancada) e a perda cai muito.
+    // Modem-sleep atrasa/derruba UDP (perda de 5–37% medida) — desligado.
     WiFi.setSleep(false);
     WiFi.begin(ssid, password);
-
-    // Sem Serial: espera a conexão (ou desiste em 15 s e segue p/ reconexão
-    // em background via wifi_kick). Nenhum print aqui para não acoplar o boot
-    // a um terminal nem custar ciclos.
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
         delay(500);
@@ -186,10 +94,8 @@ static void wifi_connect()
     last_wifi_retry_ms = millis();
 }
 
-// Atende o "hello" do force_receiver (auto-descoberta). Não-bloqueante: lê
-// todos os datagramas pendentes na porta de descoberta e, se a tag bater,
-// renova o slot do remetente em g_subs (ou ocupa um livre/expirado — na
-// falta, rouba o mais antigo).
+// Atende os hellos pendentes: renova o slot do remetente ou ocupa um
+// livre/expirado (lotado: rouba o mais antigo). Não-bloqueante.
 static void discovery_poll()
 {
     int psize;
@@ -207,19 +113,19 @@ static void discovery_poll()
             if (g_subs[i].used && g_subs[i].ip == src) { slot = i; break; }
             if (!g_subs[i].used ||
                 now - g_subs[i].last_hello_ms >= HELLO_TIMEOUT_MS) {
-                if (slot < 0) slot = i;      // 1º livre/expirado
+                if (slot < 0) slot = i;
             }
             if (now - g_subs[i].last_hello_ms >
                 now - g_subs[oldest].last_hello_ms) oldest = i;
         }
-        if (slot < 0) slot = oldest;         // lotado: rouba o mais antigo
+        if (slot < 0) slot = oldest;
         g_subs[slot].ip            = src;
         g_subs[slot].last_hello_ms = now;
         g_subs[slot].used          = true;
     }
 }
 
-// Reconexão não-bloqueante: dispara um begin() throttled e retorna na hora.
+// Reconexão não-bloqueante, throttled a WIFI_RETRY_MS.
 static void wifi_kick()
 {
     uint32_t now = millis();
@@ -228,124 +134,167 @@ static void wifi_kick()
     WiFi.begin(ssid, password);
 }
 
-// ======================================================
-// OTA — gravação pela rede (espota). A 1ª gravação ainda é por USB; depois
-// é só `pio run -t upload` apontando para o IP do ESP. A senha evita que
-// qualquer um na rede regrave o dispositivo.
-// ======================================================
+// ── OTA ─────────────────────────────────────────────────────────────────
+// 1ª gravação por USB; depois `pio run -e ota -t upload`.
 #define OTA_HOSTNAME  "forcedriver"
 #define OTA_PASSWORD  "Biolabeb0608"
 
 static void ota_setup()
 {
-    // Sem callbacks de Serial: a gravação OTA funciona igual; o progresso/erro
-    // aparece no lado do pio (host), não na serial do ESP.
     ArduinoOTA.setHostname(OTA_HOSTNAME);
     ArduinoOTA.setPassword(OTA_PASSWORD);
     ArduinoOTA.begin();
 }
 
-// ======================================================
-// SETUP
-// ======================================================
 void setup()
 {
-    // Serial DESLIGADA de propósito: nada de prints no caminho dos dados. O ADC,
-    // o WiFi e o OTA não dependem da UART.
-    analogReadResolution(12);
-    analogSetPinAttenuation(ADC_PIN, ADC_11db);  // fundo de escala ~0..3.3 V
+    hx.begin(HX_DOUT_PIN, HX_SCK_PIN, HX_GAIN);
+    // Pull-up no DOUT: sem HX711 o pino flutua em LOW (= "amostra pronta")
+    // e o loop despejaria zeros falsos; com pull-up, ausência = silêncio.
+    pinMode(HX_DOUT_PIN, INPUT_PULLUP);
+#if SERIAL_TEST
+    // LED do XIAO (GPIO21, aceso em LOW): alterna a cada amostra lida;
+    // piscando a 1 Hz = parado no heartbeat, sem amostra.
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);
+    Serial.begin(115200);
+    delay(2000);               // tempo do monitor USB CDC enumerar/abrir
+    Serial.println("[serial_test] HX711 DT=GPIO2(D1) SCK=GPIO4(D3), rádio OFF");
+    Serial.println("[serial_test] esperando amostras (DOUT precisa pulsar)...");
+#else
+    // Serial SEMPRE ativa em paralelo ao UDP: "WiFi conectado" não prova
+    // entrega (sub-rede errada / firewall no PC); a GUI deduplica (ignora a
+    // serial com UDP fresco). TxTimeout 0: sem host lendo, descarta sem
+    // bloquear a amostragem.
+    Serial.begin(115200);
+    Serial.setTxTimeoutMs(0);
     wifi_connect();
     ota_setup();
-    udpRx.begin(DISCOVERY_PORT);   // escuta o hello do force_receiver
-    last_sample_us = micros();
+    udpRx.begin(DISCOVERY_PORT);
+#endif
 }
 
-// Monta o datagrama com as amostras acumuladas e o envia por unicast a CADA
-// assinante fresco (broadcast no fallback, se não houver nenhum). Espelha o
-// formato lido pelo force_receiver (LOAD_CELL_SAMPLE_FMT '<IIf',
-// LOAD_CELL_BATCH_N amostras).
-static void flush_batch()
+// Unicast a cada assinante fresco; broadcast se não houver nenhum.
+static void send_sample()
 {
-    if (batch_count == 0) return;
-    // millis() (não micros()/1000): last_hello_ms é medido em millis(); os
-    // dois têm wrap diferente e não são comparáveis se misturados.
     uint32_t now = millis();
     bool sent = false;
     for (int i = 0; i < MAX_SUBSCRIBERS; i++) {
         if (!g_subs[i].used ||
             now - g_subs[i].last_hello_ms >= HELLO_TIMEOUT_MS) continue;
         udp.beginPacket(g_subs[i].ip, UDP_PORT);
-        udp.write(reinterpret_cast<const uint8_t*>(batch),
-                  batch_count * sizeof(Sample));
+        udp.write(reinterpret_cast<const uint8_t*>(&sample_out),
+                  sizeof(Sample));
         udp.endPacket();
         sent = true;
     }
     if (!sent) {
         udp.beginPacket(BCAST_IP, UDP_PORT);
-        udp.write(reinterpret_cast<const uint8_t*>(batch),
-                  batch_count * sizeof(Sample));
+        udp.write(reinterpret_cast<const uint8_t*>(&sample_out),
+                  sizeof(Sample));
         udp.endPacket();
     }
-    batch_count = 0;
 }
 
-// ======================================================
-// LOOP — 1 kHz não-bloqueante (amostra) + lote a ~100 Hz (envio)
-// ======================================================
 void loop()
 {
-    if (WiFi.status() != WL_CONNECTED) {
-        wifi_kick();                     // não-bloqueante: tenta e segue
-        last_sample_us = micros();       // evita rajada ao religar
-        adc_sum_mv = 0; adc_count = 0;   // descarta acúmulo parcial
-        batch_count = 0;                 // não envia lote meio montado
-        return;
+#if !SERIAL_TEST
+    const bool wifi_up = (WiFi.status() == WL_CONNECTED);
+
+    // Heartbeat de diagnóstico (0.5 Hz): estado do WiFi + nº de assinantes
+    // com hello fresco (prova de que um receptor nos alcança) + contador de
+    // amostras. Linhas '#' são ignoradas pelo parser da GUI.
+    static uint32_t last_hb_ms = 0;
+    uint32_t hb_ms = millis();
+    if (hb_ms - last_hb_ms >= 2000) {
+        last_hb_ms = hb_ms;
+        int subs = 0;
+        for (int i = 0; i < MAX_SUBSCRIBERS; i++)
+            if (g_subs[i].used &&
+                hb_ms - g_subs[i].last_hello_ms < HELLO_TIMEOUT_MS) subs++;
+        Serial.printf("# wifi=%s status=%d subs=%d amostras=%lu\n",
+                      wifi_up ? "up" : "down",
+                      (int)WiFi.status(), subs, (unsigned long)tx_seq);
     }
 
-    // Housekeeping (OTA + auto-descoberta) a ~20 Hz, FORA do caminho quente:
-    // rodá-los a cada iteração (dezenas de milhares de vezes/s) só somava
-    // latência/jitter ao laço de 1 kHz. 50 ms é folgado — o hello vem a cada 2 s
-    // e o início de uma gravação OTA tolera dezenas de ms.
-    static uint32_t last_house_ms = 0;
-    uint32_t house_ms = millis();
-    if (house_ms - last_house_ms >= 50) {
-        last_house_ms = house_ms;
-        ArduinoOTA.handle();
-        discovery_poll();
-    }
-
-    // Acumula UMA leitura (mV calibrados) por passagem do loop(). Entre dois
-    // ticks de 1 ms o loop roda ~15-30 vezes: é o oversampling LEVE que sobra a
-    // 1 kHz e dá o dither sub-mV (o filtro pesado mora no PC agora).
-    adc_sum_mv += (uint32_t)analogReadMilliVolts(ADC_PIN);
-    adc_count++;
-
-    // Subtração unsigned: trata o wrap do micros() (~71 min) corretamente.
-    uint32_t now_us = micros();
-    if ((uint32_t)(now_us - last_sample_us) < SAMPLE_INTERVAL_US) return;
-    if ((uint32_t)(now_us - last_sample_us) > 4 * SAMPLE_INTERVAL_US) {
-        last_sample_us = now_us;         // ficou pra trás (WiFi/OTA) — re-ancora
+    if (!wifi_up) {
+        wifi_kick();
     } else {
-        last_sample_us += SAMPLE_INTERVAL_US;
+        // OTA + auto-descoberta a ~20 Hz, fora do caminho quente.
+        static uint32_t last_house_ms = 0;
+        uint32_t house_ms = millis();
+        if (house_ms - last_house_ms >= 50) {
+            last_house_ms = house_ms;
+            ArduinoOTA.handle();
+            discovery_poll();
+        }
     }
-
-    if (adc_count == 0) return;   // segurança: nada acumulado neste tick
-    // Média FRACIONÁRIA dos mV (sub-mV pelo dither) → volts.
-    float v_adc = (adc_sum_mv / (float)adc_count) / 1000.0f;
-    adc_sum_mv = 0; adc_count = 0;
-
-    float v_sensor = v_adc * V_GAIN - V_OFFSET;
-
-    // Enfileira a amostra no lote (filtro pesado fica no force_receiver).
-    Sample& s = batch[batch_count];
-    s.seq   = tx_seq++;
-    s.t_us  = now_us;
-#if DIAG_RAW
-    s.v_sensor = v_adc;          // tensão CRUA do pino (sem nada)
 #else
-    s.v_sensor = v_sensor;       // leve: só a média do oversampling
+    // Heartbeat 1 Hz enquanto não chega amostra, com o nível do DOUT:
+    // preso em HIGH = HX711 ausente/DT errado; preso em LOW = SCK errado
+    // ou DT em curto.
+    static uint32_t last_beat_ms = 0;
+    static uint32_t last_sample_seq = 0;
+    uint32_t beat_ms = millis();
+    if (beat_ms - last_beat_ms >= 1000) {
+        last_beat_ms = beat_ms;
+        if (tx_seq == last_sample_seq) {
+            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+            Serial.printf("[serial_test] sem amostra ha 1 s; DOUT=%s\n",
+                          digitalRead(HX_DOUT_PIN) ? "HIGH (HX711 ausente/DT errado?)"
+                                                   : "LOW (SCK errado/DT em curto?)");
+        }
+        last_sample_seq = tx_seq;
+    }
 #endif
-    if (++batch_count >= BATCH_N) flush_batch();
-    // (Sem aviso de saturação por Serial: a checagem do SPAN do ADC é feita na
-    //  GUI/receiver pela tensão recebida — nada de prints no laço de amostragem.)
+
+    // Handshake real do HX711: só lê com DOUT baixo APÓS tê-lo visto alto
+    // desde a última leitura — um DOUT preso em LOW (curto/fiação errada)
+    // trava aqui em vez de virar stream de zeros. read() só relojoa os
+    // 24 bits (~60 µs); nunca espera conversão. No SERIAL_TEST o handshake
+    // é dispensado de propósito (queremos ler continuamente p/ diagnóstico).
+#if SERIAL_TEST
+    if (!hx.is_ready()) return;
+#else
+    static bool dout_seen_high = false;
+    if (!hx.is_ready()) { dout_seen_high = true; return; }
+    if (!dout_seen_high) return;
+    dout_seen_high = false;
+#endif
+    long counts = hx.read();
+    uint32_t now_us = micros();
+
+    float v_sensor = (float)counts * COUNTS_TO_V - V_OFFSET;
+
+    sample_out.seq      = tx_seq++;
+    sample_out.t_us     = now_us;
+    sample_out.v_sensor = v_sensor;
+#if SERIAL_TEST
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    // counts crus diagnosticam a fiação: -1 = DT com mau contato/sem GND
+    // comum; 0 = SCK não chega; ±8388607 = saturado (A+/A− trocados ou
+    // ponte solta); variando com o toque = OK. Prints a ~20 linhas/s.
+    static uint32_t last_print_ms   = 0;
+    static uint32_t win_samples     = 0;
+    win_samples++;
+    uint32_t print_ms = millis();
+    uint32_t dt_ms = print_ms - last_print_ms;
+    if (dt_ms >= 50) {
+        Serial.printf("seq=%lu  counts=%ld  v_sensor=%.6f V  (~%.0f amostras/s)\n",
+                      (unsigned long)sample_out.seq, counts, v_sensor,
+                      win_samples * 1000.0f / (float)dt_ms);
+        last_print_ms = print_ms;
+        win_samples   = 0;
+    }
+#else
+    if (wifi_up) {
+        send_sample();
+    }
+    // Serial sempre: a mesma amostra como texto, formato espelhado em
+    // touch_pack/lc_serial.py (F,<seq>,<t_us>,<v_sensor>).
+    Serial.printf("F,%lu,%lu,%.7f\n",
+                  (unsigned long)sample_out.seq,
+                  (unsigned long)sample_out.t_us,
+                  (double)sample_out.v_sensor);
+#endif
 }

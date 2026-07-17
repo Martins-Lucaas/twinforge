@@ -140,6 +140,18 @@ except Exception:  # pragma: no cover
     TOUCH_TAXELS = 16
     _TOUCH_PLOT_OK = False
 
+# Transporte serial da célula (lc_serial.py): a GUI lê a USB do XIAO e aplica
+# o mesmo filtro pesado do force_receiver; o UDP segue preferido quando vivo.
+# Guardado: sem pyserial a GUI funciona só com o caminho UDP/ROS.
+try:
+    from .lc_serial import LoadCellSerialSource
+    from .force_receiver_node import _LoadCellFilter
+    _LC_SERIAL_OK = True
+except Exception:  # pragma: no cover
+    LoadCellSerialSource = None
+    _LoadCellFilter = None
+    _LC_SERIAL_OK = False
+
 log = logging.getLogger('touch_pack.palpation_gui')
 
 # Regex p/ os CSVs "crus" (ADC, spikes RA/SA, cuneiformes) — gravados junto do
@@ -451,12 +463,12 @@ class PalpationGUI(Node):
         # ~2 s de histórico @ ~100 pacotes/s — base p/ tare estável e auto-zero.
         self._lc_voltage_buf: collections.deque = collections.deque(maxlen=200)
         self._lc_last_ts: float          = 0.0
-        # SEM calibração embutida: a GUI parte de NÃO-CALIBRADA e só publica
-        # /load_cell/force_net depois de carregar
-        # ~/.config/touch_pack/load_cell_calib.json (ou rodar o wizard).
-        # Antes havia uma calibração hardcoded com _calibrated=True — numa
-        # máquina sem o JSON a GUI publicava força (e avaliava o limite de
-        # 15 N) sobre constantes velhas, sem ninguém ter calibrado de fato.
+        # Última amostra do caminho UDP (separado de _lc_last_ts, que a
+        # serial também atualiza): o gate em _on_lc_serial_sample ignora a
+        # serial enquanto o UDP está fresco (<1 s) — deduplicação.
+        self._lc_udp_ts: float           = 0.0
+        # A GUI parte de NÃO-CALIBRADA: /load_cell/force_net só é publicada
+        # após carregar o load_cell_calib.json (ou rodar o wizard).
         self._lc_calibrated: bool        = False
         self._lc_calib_slope: float      = 0.0
         self._lc_calib_intercept: float  = 0.0
@@ -490,6 +502,16 @@ class PalpationGUI(Node):
         self._touch_value: float = 0.0
         self._touch_last_ts: float = 0.0
         self._touch_rx_proc: subprocess.Popen | None = None
+        # ─── Transporte serial da célula de carga ─────────────────────────
+        # '' (default) → auto-detect pelo VID Espressif; thread cuida do
+        # hot-plug. O filtro pesado é o do force_receiver (fora do circuito
+        # no caminho serial); só a thread lc-serial o toca.
+        self._lc_serial_port = str(self.declare_parameter(
+            'lc_serial_port', '').value).strip()
+        self._lc_serial_source = None      # LoadCellSerialSource | None
+        self._lc_serial_filter = _LoadCellFilter() if _LC_SERIAL_OK else None
+        # t_us da amostra serial anterior → dt real do filtro.
+        self._lc_serial_last_t_us: int | None = None
         # ─── Fonte serial do touch sensor + figura embutida (aba Sensores) ─
         # Porta da serial do STM32: '' (default) → auto-detect (/dev/ttyACMx).
         self._touch_port = str(self.declare_parameter(
@@ -644,6 +666,9 @@ class PalpationGUI(Node):
         # Abre a serial do STM32 (best-effort) e dispara o loop de redesenho
         # da figura embutida na aba Sensores.
         self._start_touch_source()
+        # Arma o fallback serial da célula (a thread cuida de detectar/abrir/
+        # reabrir a USB do XIAO sozinha; muda enquanto o WiFi do ESP funciona).
+        self._start_lc_serial()
         self.root.after(200, self._refresh_sensors_tab)
         # Hot-plug serial↔rede: reconcilia a fonte do toque a cada 2 s.
         self.root.after(2000, self._retry_touch_source)
@@ -3461,9 +3486,60 @@ class PalpationGUI(Node):
         self._set_status(
             f'Sensor tared — reference: {avg_v:.4f} V (stable ±{ptp_n:.3f} N).', OK)
 
+    # ── Célula de carga — fallback serial (ESP32 sem WiFi) ───────────
+    def _start_lc_serial(self) -> None:
+        """Arma o leitor da USB do XIAO (lc_serial.LoadCellSerialSource).
+
+        Best-effort: sem pyserial o transporte serial fica desabilitado e a
+        GUI segue só com o caminho UDP/ROS. A thread da fonte cuida sozinha de
+        detectar a porta (VID Espressif), abrir e reabrir em hot-plug; o
+        firmware emite as amostras SEMPRE, e o gate em _on_lc_serial_sample é
+        quem mantém o UDP como caminho preferido quando está vivo."""
+        if not _LC_SERIAL_OK:
+            log.info('[LC] pyserial ausente — fallback serial da célula '
+                     'desabilitado')
+            return
+        self._lc_serial_source = LoadCellSerialSource(
+            port=(self._lc_serial_port or None),
+            on_sample=self._on_lc_serial_sample)
+        self._lc_serial_source.start()
+        log.info('[LC] fallback serial armado (%s)',
+                 self._lc_serial_port or 'auto-detect XIAO VID 0x303A')
+
+    def _on_lc_serial_sample(self, seq: int, t_us: int, v_raw: float) -> None:
+        """Amostra vinda da USB do XIAO (thread lc-serial, 10/80 Hz).
+
+        Reproduz o que o force_receiver faz no caminho UDP — dt real pelo
+        t_us do firmware + filtro pesado (mediana + One-Euro) — e injeta o
+        resultado no MESMO pipeline do callback ROS (_ingest_lc_voltage:
+        tare/calibração/força/publicação de /load_cell/force_net). O firmware
+        emite na serial SEMPRE (rede não prova entrega), então este gate por
+        frescor do UDP é o deduplicador: com o UDP vivo (< 1 s) a serial é
+        ignorada e o caminho de rede continua preferido."""
+        if time.time() - self._lc_udp_ts < 1.0:
+            return
+        dt = None
+        if self._lc_serial_last_t_us is not None:
+            d_us = (t_us - self._lc_serial_last_t_us) & 0xFFFFFFFF
+            if 0 < d_us <= 500_000:
+                dt = d_us / 1e6
+        self._lc_serial_last_t_us = t_us
+        v = self._lc_serial_filter.update(float(v_raw), dt)
+        with self._lock:
+            self._lc_voltage_raw = float(v_raw)
+            self._lc_voltage_raw_ts = time.time()
+        self._ingest_lc_voltage(v)
+
     # ── Callbacks ROS — célula de carga ──────────────────────────────
     def _cb_lc_voltage(self, msg: Float32) -> None:
-        v = float(msg.data)
+        with self._lock:
+            self._lc_udp_ts = time.time()
+        self._ingest_lc_voltage(float(msg.data))
+
+    def _ingest_lc_voltage(self, v: float) -> None:
+        """Tensão FILTRADA da célula → buffers/tare/força (+ publicação de
+        /load_cell/force_net). Ponto de entrada ÚNICO dos dois transportes:
+        o callback ROS (UDP via force_receiver) e o fallback serial."""
         with self._lock:
             self._lc_voltage = v
             self._lc_voltage_buf.append(v)
@@ -3537,15 +3613,19 @@ class PalpationGUI(Node):
             ]
             # #5: assinatura da escala de firmware com que esta calibração foi
             # feita. Calibrações antigas (sem o campo) não disparam o aviso.
+            # Tolerância RELATIVA (não absoluta): com o HX711 a escala é
+            # counts→V ≈ 2e-7, menor que qualquer tolerância absoluta razoável.
             scale_raw  = data.get('voltage_scale')
             offset_raw = data.get('voltage_offset')
             mismatch = bool(
                 (scale_raw is not None
-                 and abs(float(scale_raw) - LC_FW_VOLTAGE_SCALE) > 1e-6)
+                 and not math.isclose(float(scale_raw), LC_FW_VOLTAGE_SCALE,
+                                      rel_tol=1e-6, abs_tol=1e-12))
                 # offset ausente em calibrações antigas → assume o offset
                 # vigente (não dispara aviso só por causa do campo novo).
                 or (offset_raw is not None
-                    and abs(float(offset_raw) - LC_FW_VOLTAGE_OFFSET) > 1e-6))
+                    and not math.isclose(float(offset_raw), LC_FW_VOLTAGE_OFFSET,
+                                         rel_tol=1e-6, abs_tol=1e-9)))
             with self._lock:
                 self._lc_calib_slope     = slope
                 self._lc_calib_intercept = intercept
@@ -3562,9 +3642,9 @@ class PalpationGUI(Node):
                 old_scale  = float(scale_raw)  if scale_raw  is not None else float('nan')
                 old_offset = float(offset_raw) if offset_raw is not None else float('nan')
                 self.get_logger().warn(
-                    f'Calibração LC feita com firmware gain={old_scale:.4f} '
-                    f'offset={old_offset:.4f}, mas o firmware atual usa '
-                    f'gain={LC_FW_VOLTAGE_SCALE:.4f} offset={LC_FW_VOLTAGE_OFFSET:.4f} '
+                    f'Calibração LC feita com firmware gain={old_scale:.6g} '
+                    f'offset={old_offset:.6g}, mas o firmware atual usa '
+                    f'gain={LC_FW_VOLTAGE_SCALE:.6g} offset={LC_FW_VOLTAGE_OFFSET:.6g} '
                     f'— RECALIBRE: slope/intercept estão inválidos.')
         except Exception as exc:
             self.get_logger().warn(f'Falha ao ler calibração LC: {exc}')
@@ -3802,13 +3882,9 @@ class PalpationGUI(Node):
             # (F=0, V=V₀) e ajustamos SÓ o ganho — mínimos quadrados pela origem
             # de (v − V₀) contra F: slope = Σ(F·Δv)/Σ(F²), intercept = V₀.
             #
-            # Por que não polyfit livre: o polyfit deixa o intercepto flutuar.
-            # Se os pontos com carga extrapolam para um V≠V₀ em F=0 (não-
-            # linearidade/folga perto de zero, ou um ponto ruim), o intercepto
-            # ajustado não bate com a tensão real de repouso e a força lida com
-            # 0 V sai em vários N (era o "-5.42 N parado"). Ancorar garante
-            # F(repouso)=0 por construção, que é como uma célula de carga deve
-            # ser calibrada (a reta passa pela saída sem carga).
+            # Por que não polyfit livre: o intercepto flutuaria e, se os
+            # pontos com carga extrapolam V≠V₀ em F=0, a força em repouso sai
+            # em vários N. Ancorar garante F(repouso)=0 por construção.
             F  = np.asarray(forces_load, dtype=float)
             dv = np.asarray(voltages_load, dtype=float) - zero_v
             denom = float(np.sum(F * F))
@@ -6547,6 +6623,12 @@ class PalpationGUI(Node):
         if self._touch_source is not None:
             try:
                 self._touch_source.stop()
+            except Exception:
+                pass
+        # Idem para o fallback serial da célula de carga.
+        if self._lc_serial_source is not None:
+            try:
+                self._lc_serial_source.stop()
             except Exception:
                 pass
         # Parar heartbeat e cancelar reconexão antes de fechar sockets.

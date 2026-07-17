@@ -1,10 +1,6 @@
 """
 constants.py — Constantes compartilhadas do touch_pack.
 
-Fonte única para valores que antes viviam duplicados na GUI, no explorer,
-no logger e nos nós auxiliares ("atualizei um lado só" era uma classe de
-bug real: o limite de 15 N e a pose POINTING existiam em 2 cópias).
-
 Regra: valores usados por MAIS de um módulo moram aqui; valores privados
 de um único módulo ficam nele.
 """
@@ -16,8 +12,7 @@ import os
 # ── Cadeia do braço CR10 (convenção URDF) ────────────────────────────────────
 ARM_JOINTS = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
 
-# Pose "apontar para a mesa": braço vertical com o efetuador perpendicular.
-# É a home default da GUI e o seed POINTING do explorer.
+# Pose "apontar para a mesa": home default da GUI e seed POINTING do explorer.
 POINTING_SEED_DEG = {'joint1': 0.0, 'joint2': 0.0, 'joint3': -90.0,
                      'joint4': 0.0, 'joint5': 90.0, 'joint6': 0.0}
 
@@ -30,103 +25,79 @@ HAND_POINT_DEG = {'Thumb': 30.0, 'Index': 0.0, 'Middle': 80.0,
 HAND_POINTING_RAD = {j: math.radians(v) for j, v in HAND_POINT_DEG.items()}
 
 # ── Controle de força ────────────────────────────────────────────────────────
-# Limite de segurança: a medição é CANCELADA se a compressão exceder este
-# valor (explorer aborta; GUI exibe DANGER ao se aproximar).
+# Limite de segurança: medição CANCELADA se a compressão exceder este valor.
 FORCE_ABORT_LIMIT_N = 15.0
 # Setpoint máximo selecionável na GUI.
 FORCE_SETPOINT_MAX_N = 10.0
 
-# ── Célula de carga (ESP32 via UDP) ──────────────────────────────────────────
+# ── Célula de carga (XIAO ESP32S3 + HX711, telemetria UDP) ───────────────────
 LOAD_CELL_UDP_PORT = 8080
-# A ESP32 amostra a 1 kHz (1 ms) e ENVIA EM LOTE: empacota
-# LOAD_CELL_BATCH_N amostras por datagrama, transmitindo ~100 pacotes/s. Isso
-# entrega 1 kHz de dados mantendo a taxa de pacotes na faixa que o WiFi sustenta
-# de forma confiável (1000 datagramas minúsculos/s estouravam o airtime e a
-# perda). Cada amostra é auto-descritiva (seq + timestamp + tensão), então um
-# pacote perdido aparece como salto de seq, sem desalinhar o stream.
-#
-# Amostra (little-endian, 12 bytes): uint32 seq + uint32 t_us + float v_sensor.
-#   seq    — contador incremental por AMOSTRA (não por pacote); o salto revela
-#            amostras perdidas.
-#   t_us   — micros() da ESP32 no instante da amostra; é o relógio de 1 ms usado
-#            para colocar força e toque numa grade temporal comum (sincronização).
-#   v_sensor — tensão calibrada (V), com filtro LEVE na ESP (só média do
-#            oversampling); o filtro pesado roda no force_receiver (PC).
-# Espelhado em sensors/ForceDriver/src/main.cpp (struct Sample).
+# Amostra (little-endian, 12 bytes), espelhada no struct Sample do firmware
+# (sensors/ForceDriver/src/main.cpp):
+#   uint32 seq      — contador por amostra (salto = amostras perdidas)
+#   uint32 t_us     — micros() da ESP (relógio de sincronização)
+#   float  v_sensor — tensão da ponte ×PGA (V); filtro pesado fica no PC
 LOAD_CELL_SAMPLE_FMT = '<IIf'
-# Quantas amostras a ESP agrupa por datagrama. 1 kHz / 10 = 100 pacotes/s.
-# Espelhado no firmware (BATCH_N).
-LOAD_CELL_BATCH_N = 10
+# Amostras por datagrama (1 no firmware atual; o receiver aceita qualquer
+# múltiplo de 12 B).
+LOAD_CELL_BATCH_N = 1
+# Taxa nominal do HX711 (pino RATE: GND = 10 Hz, VDD = 80 Hz) — só chute
+# inicial do filtro; o dt real medido pelo t_us é quem manda.
+LOAD_CELL_NOMINAL_RATE_HZ = 80.0
 
-# Auto-descoberta para enviar a telemetria por UNICAST (broadcast no WiFi não
-# é reconhecido/retransmitido pela 802.11 → ~30% de perda). O force_receiver
-# manda um "hello" periódico para o IP FIXO do ESP nesta porta; o ESP grava o
-# remetente e passa a enviar a telemetria unicast de volta (com fallback a
-# broadcast se nunca receber/ficar obsoleto). Espelhado no firmware.
-LOAD_CELL_ESP_IP        = '192.168.5.105'   # IP estático do ESP (WiFi.config)
-LOAD_CELL_DISCOVERY_PORT = 8090             # porta onde o ESP escuta o hello
-LOAD_CELL_DISCOVERY_MAGIC = b'FRCV'         # tag do hello (ignora tráfego alheio)
+# Auto-descoberta: o force_receiver manda um "hello" periódico ao IP fixo do
+# ESP e passa a receber a telemetria por unicast (broadcast em WiFi perde
+# muito). Espelhado no firmware.
+LOAD_CELL_ESP_IP        = '192.168.5.105'   # IP estático do ESP — rede do LAB; em casa ("Martins 6") era .6.105
+LOAD_CELL_DISCOVERY_PORT = 8090
+LOAD_CELL_DISCOVERY_MAGIC = b'FRCV'
 
-# Transformação AFIM tensão_ADC→v_sensor aplicada no firmware da ESP32.
-# ESPELHO EXATO de sensors/ForceDriver/src/main.cpp:
-#     v_sensor = v_adc * V_GAIN - V_OFFSET
-# V_GAIN = (R1+R2)/R2 com R1/R2 AFERIDOS pelo ADC (não pelo nominal): o divisor
-# nominal 221k/98.6k daria 3.2414, mas o ADC do ESP32 tem impedância de entrada
-# finita que carrega o divisor, então o R1 efetivo ≠ resistor físico. Aferido em
-# 2026-07-10 com 500 g: V_amp=0.345 V e v_adc reportado pelo ADC=0.2572 V →
-# V_GAIN=0.345/0.2572=1.341 (R2=98600, R1_efetivo=33650). Calibrar pelo pino com
-# multímetro (0.178 V) dava 1.9438 e jogava a GUI p/ ~0.5 V — errado, pois o
-# multímetro alta-Z não vê o carregamento. V_OFFSET foi zerado na troca p/ a
-# célula de 5 kg (a tare/calib da GUI cuida do zero).
-# Estes dois valores formam a ASSINATURA da configuração de hardware/firmware:
-# a GUI grava ambos no load_cell_calib.json ao calibrar e avisa quando a
-# calibração vigente foi feita com ganho/offset diferentes (firmware alterado
-# → slope/intercept salvos ficam inválidos silenciosamente). MANTER SINCRONIZADO
-# com o V_GAIN/V_OFFSET do firmware — se um mudar, o outro TEM de mudar junto.
-LC_FW_VOLTAGE_SCALE  = 1.3413      # = V_GAIN do firmware ((33650+98600)/98600, aferido ADC)
-LC_FW_VOLTAGE_OFFSET = 0.190461    # = V_OFFSET do firmware (repouso da célula de 5 kg, deriva)
+# Transporte SERIAL paralelo (sempre ativo): o firmware imprime cada amostra
+# na USB CDC como "F,<seq>,<t_us>,<v_sensor>" e a palpation_gui lê a porta
+# direto (lc_serial.py). A GUI deduplica: ignora a serial enquanto o UDP está
+# fresco. Espelhado no firmware.
+LOAD_CELL_SERIAL_BAUD   = 115200
+LOAD_CELL_SERIAL_PREFIX = 'F,'
+# VID USB da Espressif (XIAO): identifica a porta da célula e a distingue do
+# STM32 do touch sensor — o auto-detect do toque EXCLUI este VID.
+LOAD_CELL_USB_VID = 0x303A
+
+# Conversão counts→v_sensor aplicada no firmware (v = counts·SCALE − OFFSET).
+# ESPELHO EXATO de COUNTS_TO_V/V_OFFSET do main.cpp — se um mudar, o outro
+# TEM de mudar junto. Os dois valores formam a ASSINATURA da configuração de
+# hardware: a GUI grava ambos no load_cell_calib.json ao calibrar, e GUI +
+# force_receiver RECUSAM calibração com assinatura divergente (slope/intercept
+# de outra escala dariam força errada silenciosamente).
+LC_FW_VOLTAGE_SCALE  = 3.3 / (1 << 24)   # AVDD/2²⁴ ≈ 1.9670e-7 V/count
+LC_FW_VOLTAGE_OFFSET = 0.0
 
 # ── Touch sensor (STM32 → PC plotter → UDP) ──────────────────────────────────
-# Porta DIFERENTE da célula de carga: o force_receiver aceita qualquer
-# datagrama ≥ 8 bytes sem filtrar remetente — na mesma porta os fluxos
-# se misturariam silenciosamente.
+# Porta DIFERENTE da célula: o receptor não filtra remetente, na mesma porta
+# os fluxos se misturariam.
 TOUCH_SENSOR_UDP_PORT = 8081
-# Payload (little-endian, 8 bytes): uint32 seq + float valor.
-# Espelhado em sensors/Touch_sensor/touch_sensor.py (roda fora do ROS).
+# Payload (little-endian, 8 bytes): uint32 seq + float valor. Espelhado no
+# plotter standalone (sensors/Touch_sensor).
 TOUCH_PAYLOAD_FMT = '<If'
-# IP de broadcast para o qual o plotter (TouchSensorSource) reemite o I_final
-# por UDP a cada TOTAL — exatamente o papel do plotter original. O receptor é
-# o touch_receiver_node (porta 8081, mesmo formato). É o MESMO broadcast que a
-# ESP32 da célula usa (DEST_IP em sensors/ForceDriver/src/main.cpp); a porta
-# 8081 (≠ 8080) é o que evita misturar os fluxos toque/força.
+# Broadcast do I_final reemitido pelo TouchSensorSource a cada TOTAL.
 TOUCH_UDP_BROADCAST_IP = '192.168.5.255'
-# Porta do RELAY do frame completo do toque (linhas brutas do STM32) para PCs
-# remotos SEM USB. O PC que tem a serial retransmite as linhas do firmware por
-# UDP nesta porta; um PC remoto faz bind aqui e injeta as linhas no MESMO parser
-# (TouchSensorSource._parse_line), reconstruindo heatmap/rasters/pós idênticos.
-# A 8081 segue carregando SÓ o escalar I_final (touch_receiver/force_sync
-# dependem desse formato '<If'); por isso o frame completo usa porta separada.
+# Relay do frame COMPLETO do toque (linhas brutas do STM32) para PCs sem USB:
+# um PC remoto faz bind aqui e injeta as linhas no mesmo parser. Porta
+# separada porque a 8081 carrega só o escalar '<If'.
 TOUCH_FRAME_UDP_PORT = 8082
 
 # Idade máxima de uma amostra para entrar no par sincronizado (s).
-# A célula amostra a 100 Hz (10 ms); 0.25 s = ~25 amostras perdidas antes
-# de considerarmos a fonte morta.
 SYNC_MAX_AGE_S = 0.25
 
-# ── Tátil COMPLETO em ROS (frame ADC + eventos) p/ o CSV unificado ───────────
-# O parser do STM32 vive no processo da GUI (TouchSensorSource). Para que o
-# palpation_logger possa juntar TUDO num único CSV do experimento, a GUI
-# republica em ROS: o frame de taxels (ADC) e CADA evento de spike/cuneiforme.
-# O logger acumula o último frame + conta os eventos por amostra (1 kHz).
-TOUCH_ADC_TOPIC   = '/touch_sensor/adc'          # std_msgs/Int32MultiArray (N taxels)
+# ── Tátil completo em ROS (frame ADC + eventos) p/ o CSV unificado ───────────
+# A GUI republica o frame de taxels e cada evento de spike para o
+# palpation_logger juntar tudo num único CSV.
+TOUCH_ADC_TOPIC   = '/touch_sensor/adc'          # std_msgs/Int32MultiArray
 TOUCH_EVENT_TOPIC = '/touch_sensor/spike_event'  # std_msgs/String: RA|SA|CN_MM|CN_RA|CN_SA
-TOUCH_TAXELS_DEFAULT = 25                         # grade 5×5 → colunas taxel_0..24
+TOUCH_TAXELS_DEFAULT = 25                         # grade 5×5
 TOUCH_EVENT_TYPES = ('RA', 'SA', 'CN_MM', 'CN_RA', 'CN_SA')
 
 # ── Códigos numéricos das fases no CSV unificado ─────────────────────────────
-# O CSV grava a fase como NÚMERO (não string) para facilitar parsing/plot.
-# As fases principais seguem 0,1,2,3 (HOME→DESCENDING→HOLD→SLIDING); IDLE e os
-# estados terminais usam códigos fora dessa faixa. RETRACT foi dobrado no HOME.
+# RETRACT dobrado no HOME.
 PHASE_CODES = {
     'IDLE': -1, 'HOME': 0, 'DESCENDING': 1, 'HOLD': 2, 'SLIDING': 3,
     'RETRACT': 0, 'DONE': 4, 'ABORTED': 5,
@@ -143,22 +114,17 @@ POSES_FILE            = os.path.join(CONFIG_DIR, 'poses.json')
 PALPATION_PARAMS_FILE = os.path.join(CONFIG_DIR, 'palpation_params.json')
 
 # ── Saída dos runs ───────────────────────────────────────────────────────────
-# Os dados (CSV de runs e do stream força+toque) são gravados em
-# <raiz_do_repo>/sensors/Data. A raiz é localizada subindo a partir deste
-# arquivo até achar um diretório que contenha `sensors/` — funciona tanto
-# rodando do código-fonte (src/...) quanto do espaço instalado (install/...),
-# ambos sob a raiz do repositório. Override explícito: TOUCH_PACK_DATA_DIR.
+# CSVs gravados em <raiz_do_repo>/sensors/Data. Override: TOUCH_PACK_DATA_DIR.
 def _resolve_repo_root() -> str | None:
-    """Sobe a partir deste arquivo até achar um diretório que contenha
-    `sensors/` — funciona rodando do código-fonte (src/...) ou do espaço
-    instalado (install/...), ambos sob a raiz do repositório. None se o pacote
-    estiver instalado fora da árvore do repo."""
+    """Sobe a partir deste arquivo até achar um diretório com `sensors/` —
+    funciona do código-fonte (src/...) e do espaço instalado (install/...).
+    None se o pacote estiver instalado fora da árvore do repo."""
     d = os.path.dirname(os.path.abspath(__file__))
     for _ in range(10):
         if os.path.isdir(os.path.join(d, 'sensors')):
             return d
         parent = os.path.dirname(d)
-        if parent == d:        # chegou na raiz do filesystem
+        if parent == d:
             break
         d = parent
     return None
@@ -173,29 +139,24 @@ def _resolve_runs_dir() -> str:
         return os.path.abspath(os.path.expanduser(env))
     if _REPO_ROOT:
         return os.path.join(_REPO_ROOT, 'sensors', 'Data')
-    # Fallback: repo não encontrado (pacote instalado fora da árvore) —
-    # mantém o comportamento antigo para não perder dados.
     return os.path.expanduser('~/touch_pack_runs')
 
 
 RUNS_DIR = _resolve_runs_dir()
 
-# ── Calibração da célula COMPARTILHADA via git ───────────────────────────────
-# A calibração pertence ao SENSOR (célula+amp+firmware), não ao PC. Para que
-# toda máquina que clonar o repo já venha calibrada, guardamos uma cópia
-# VERSIONADA aqui no repo. Precedência de LEITURA: a calibração local em
-# ~/.config (recalibrada NESTA máquina) ganha; se não houver, cai nesta cópia do
-# repo. None se o pacote estiver instalado fora da árvore do repo.
+# ── Calibração da célula compartilhada via git ───────────────────────────────
+# A calibração pertence ao SENSOR, não ao PC: uma cópia versionada vive no
+# repo para toda máquina que clonar já vir calibrada. Leitura: a local
+# (~/.config) tem precedência; escrita vai sempre para a local (e é espelhada
+# no repo para virar diff de commit).
 LC_CALIB_REPO_FILE = (os.path.join(_REPO_ROOT, 'sensors', 'load_cell_calib.json')
                       if _REPO_ROOT else None)
 
 
 def lc_calib_read_path() -> str:
-    """Caminho de onde LER a calibração: prefere a local (~/.config); se não
-    existir, cai na versionada no repo (compartilhada via git). Gravar sempre vai
-    para LC_CALIB_FILE (local) — e é espelhado no repo para virar diff de commit."""
+    """Caminho de onde LER a calibração (local > repo > local inexistente)."""
     if os.path.exists(LC_CALIB_FILE):
         return LC_CALIB_FILE
     if LC_CALIB_REPO_FILE and os.path.exists(LC_CALIB_REPO_FILE):
         return LC_CALIB_REPO_FILE
-    return LC_CALIB_FILE   # nenhum existe: o loader trata a ausência
+    return LC_CALIB_FILE
