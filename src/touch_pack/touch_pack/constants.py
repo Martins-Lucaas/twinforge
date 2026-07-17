@@ -26,9 +26,22 @@ HAND_POINTING_RAD = {j: math.radians(v) for j, v in HAND_POINT_DEG.items()}
 
 # ── Controle de força ────────────────────────────────────────────────────────
 # Limite de segurança: medição CANCELADA se a compressão exceder este valor.
+# Com a célula de 100 kg (≥ LOAD_CELL_RATED_N) o limite NÃO protege mais a
+# célula — protege a amostra, a mesa e o robô; os valores continuam os dos
+# ensaios do artigo (setpoints 1–10 N).
 FORCE_ABORT_LIMIT_N = 15.0
 # Setpoint máximo selecionável na GUI.
 FORCE_SETPOINT_MAX_N = 10.0
+
+# ── Identidade da célula de carga vigente ────────────────────────────────────
+# 17/07/2026: célula de 100 kg montada entre OS MESMOS acopladores impressos
+# da montagem anterior (a barra de 5 kg saiu). O TCP não muda
+# (kinematics.T_TOUCH_TOOL_ATTACH) e o firmware também não — ele só transmite
+# a tensão da ponte. O que muda é a SENSIBILIDADE (~20× menos V por N):
+# slope/intercept pertencem à CÉLULA, então toda troca exige recalibrar na
+# aba Calibration da GUI (a assinatura voltage_scale/offset já força isso).
+LOAD_CELL_RATED_KG = 100.0
+LOAD_CELL_RATED_N  = LOAD_CELL_RATED_KG * 9.80665   # ≈ 980,7 N
 
 # ── Célula de carga (XIAO ESP32S3 + HX711, telemetria UDP) ───────────────────
 LOAD_CELL_UDP_PORT = 8080

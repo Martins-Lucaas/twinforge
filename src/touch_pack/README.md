@@ -12,9 +12,9 @@ It also includes a **neuromorphic touch sensor (STM32, 4×4 array + Izhikevich m
 
 <p align="center">
   <img src="../../images/physical_cr10_palpation_touch_tool.jpg" width="47%" alt="The real CR10 arm carrying the palpation tool, with the load cell and the red contact tip at the end"/>
-  <img src="../../images/physical_touch_tool_load_cell_5kg.jpg" width="47%" alt="Close-up of the palpation end effector: the 5 kg load cell bolted between two 3D-printed couplers, contact tip in red"/>
+  <img src="../../images/physical_touch_tool_load_cell_5kg.jpg" width="47%" alt="Close-up of the palpation end effector: the load cell bolted between two 3D-printed couplers, contact tip in red"/>
 </p>
-<p align="center"><em>The real end effector: the <strong>5 kg load cell</strong> is bolted between the lower and upper printed couplers, with the TouchTool tip at the end — the physical counterpart of the <code>touch_tool</code> URDF chain.</em></p>
+<p align="center"><em>The real end effector: the <strong>100 kg load cell</strong> is bolted between the lower and upper printed couplers, with the TouchTool tip at the end — the physical counterpart of the <code>touch_tool</code> URDF chain (photos show the earlier 5 kg build; the couplers and geometry are the same). Any cell swap requires recalibrating in the GUI's <strong>Calibration</strong> tab.</em></p>
 
 > The GUI is written in Portuguese. Where this README refers to on-screen labels, the original text is given in parentheses.
 

@@ -141,10 +141,13 @@ _DEADBEAT_DX_MAX_M = 2.5e-4     # 0.25 mm: passo cheio do alívio de EMERGÊNCIA
 # deslize sair da amostra (borda), a correção de força empurraria para baixo
 # indefinidamente atrás do setpoint; ao exceder este curso o deslize termina.
 _SLIDE_MAX_SINK_M    = 0.010    # 10 mm
-_CONTACT_ON_N      = 0.05       # N: força que caracteriza contato. A célula tem
-                                # ruído ZERO em ar livre (coletas de 04/07) e
-                                # degrau de leitura ~9 mN; 0.05 N detecta o toque
-                                # com ~3× menos penetração que os 0.15 N antigos.
+_CONTACT_ON_N      = 0.05       # N: força que caracteriza contato. Aferido com
+                                # a célula de 5 kg (ruído ZERO em ar livre nas
+                                # coletas de 04/07, degrau ~9 mN). Com a célula
+                                # de 100 kg + HX711 (17/07) o ruído em N sobe
+                                # ~20×: VALIDAR o piso em ar livre na GUI antes
+                                # de coletar — se houver falso contato, subir
+                                # para 0.1–0.2 N.
 # Teto de segurança da velocidade de aproximação até o contato (m/s). Bound do
 # transiente de impacto (≈ v·latência·K) sob a margem de força. Com o sensor
 # rígido a rigidez medida chegou a ~150 N/mm (coleta de 02/07: 0,12 mm → 12 N;

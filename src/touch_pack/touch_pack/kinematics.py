@@ -75,8 +75,11 @@ T_HAND_ATTACH = np.array([
     [0.0,  0.0,  0.0,  1.00000],
 ], dtype=float)
 
-# TCP do TouchTool Square 20×20 mm na Célula de Carga 5 kg montada
-# (CelulaDeCarga_5kg_Montagem). A célula é single-point/cantilever: a placa-robô
+# TCP do TouchTool Square 20×20 mm na célula de carga montada entre os
+# acopladores impressos (desde 17/07/2026 a célula é a de 100 kg; os
+# acopladores e offsets são OS MESMOS da montagem 5 kg — mesh
+# CelulaDeCarga_5kg_Montagem — então o TCP não muda).
+# A célula é single-point/cantilever: a placa-robô
 # assenta plana no flange (Link6) e a barra cantilevera em −Link6_y, levando a
 # placa do touch_tool a −55 mm em Y e +28 mm em Z. O touch_tool monta nessa placa
 # apontando +Link6_z e seu probe estende +114.5 mm → TCP em (0, −55, +142.5) mm.

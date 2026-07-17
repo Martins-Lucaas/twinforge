@@ -84,7 +84,7 @@ from .constants import (
     FORCE_ABORT_LIMIT_N as _FORCE_ABORT_LIMIT_N,
     FORCE_SETPOINT_MAX_N,
     HOME_POSE_FILE, ROBOT_CONFIG_FILE, LC_CALIB_FILE, POSES_FILE,
-    LC_CALIB_REPO_FILE, lc_calib_read_path,
+    LC_CALIB_REPO_FILE, lc_calib_read_path, LOAD_CELL_RATED_KG,
     PALPATION_PARAMS_FILE, RUNS_DIR,
     LC_FW_VOLTAGE_SCALE, LC_FW_VOLTAGE_OFFSET,
     TOUCH_ADC_TOPIC, TOUCH_EVENT_TOPIC,
@@ -3316,8 +3316,10 @@ class PalpationGUI(Node):
         tk.Label(mass_row, text='Weight mass (tension)', font=FONT_LBL,
                  bg=PANEL, fg=TEXT).pack(side='left')
         self.lc_mass_var = tk.DoubleVar(value=0.100)
+        # Teto = capacidade da célula vigente (100 kg); com ela, pesos bem
+        # maiores que os ~1 kg da era 5 kg dão pontos com muito mais SNR.
         tk.Spinbox(
-            mass_row, from_=0.001, to=10.0, increment=0.001,
+            mass_row, from_=0.001, to=LOAD_CELL_RATED_KG, increment=0.001,
             textvariable=self.lc_mass_var, width=8, font=FONT_MONO,
             justify='right', relief='flat', bd=0,
             highlightthickness=1, highlightbackground=BORDER,

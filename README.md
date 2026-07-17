@@ -171,10 +171,10 @@ Each package documents how to run it in its own README.
 - **Touch sensor (STM32):** connects over USB (115200 baud) — the GUI reads the serial port directly in the **Sensors** tab; without a local serial port, relay it over UDP on port 8081 (`touch_receiver`).
 
 <p align="center">
-  <img src="images/physical_cr10_palpation_touch_tool.jpg" width="47%" alt="Real CR10 arm carrying the palpation tool: 5 kg load cell between 3D-printed couplers with the red contact tip"/>
-  <img src="images/physical_touch_tool_load_cell_5kg.jpg" width="47%" alt="Close-up of the palpation tool showing the 5 kg load cell sandwiched between the printed couplers"/>
+  <img src="images/physical_cr10_palpation_touch_tool.jpg" width="47%" alt="Real CR10 arm carrying the palpation tool: load cell between 3D-printed couplers with the red contact tip"/>
+  <img src="images/physical_touch_tool_load_cell_5kg.jpg" width="47%" alt="Close-up of the palpation tool showing the load cell sandwiched between the printed couplers"/>
 </p>
-<p align="center"><em>The palpation end effector on the real CR10: the <strong>5 kg load cell</strong> sits between the printed couplers, with the contact tip at the end. Swapping it for the COVVI hand is what <code>end_effector:=hand</code> vs <code>touch_tool</code> selects.</em></p>
+<p align="center"><em>The palpation end effector on the real CR10: the <strong>100 kg load cell</strong> sits between the printed couplers, with the contact tip at the end (photos show the earlier 5 kg build — same couplers and geometry). Swapping it for the COVVI hand is what <code>end_effector:=hand</code> vs <code>touch_tool</code> selects.</em></p>
 
 ---
 
