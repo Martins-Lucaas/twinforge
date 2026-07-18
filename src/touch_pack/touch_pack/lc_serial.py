@@ -101,6 +101,19 @@ class LoadCellSerialSource:
             self._thread.join(timeout=2.0)
             self._thread = None
 
+    def send(self, data: bytes) -> bool:
+        """Escreve um comando na porta (ex.: b'Z' = re-zero do firmware).
+        False se a porta não está aberta agora. pyserial permite write de
+        outra thread enquanto a de leitura está no readline()."""
+        ser = self._ser
+        if ser is None:
+            return False
+        try:
+            ser.write(data)
+            return True
+        except Exception:
+            return False
+
     # ──────────────────────────────────────────────────────────────────
     def _worker(self) -> None:
         while self._running:

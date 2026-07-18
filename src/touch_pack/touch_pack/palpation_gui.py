@@ -462,6 +462,12 @@ class PalpationGUI(Node):
         self._lc_voltage_raw_ts: float   = 0.0
         # ~2 s de histórico @ ~100 pacotes/s — base p/ tare estável e auto-zero.
         self._lc_voltage_buf: collections.deque = collections.deque(maxlen=200)
+        # Stream CRU (pré-filtro, /load_cell/voltage_raw ou serial) — usado
+        # pelas capturas de calibração: o zero estacionário deve ser travado
+        # sobre o dado bruto, sem depender da dinâmica do One-Euro.
+        # Tuplas (time.monotonic(), v): a janela de captura é POR TEMPO, já
+        # que a taxa do HX711 muda com o pino RATE (10 vs 80 Hz).
+        self._lc_voltage_raw_buf: collections.deque = collections.deque(maxlen=800)
         self._lc_last_ts: float          = 0.0
         # Última amostra do caminho UDP (separado de _lc_last_ts, que a
         # serial também atualiza): o gate em _on_lc_serial_sample ignora a
@@ -489,7 +495,10 @@ class PalpationGUI(Node):
         # deriva DC (térmica/creep) que faz o "0 N" sair do lugar com o tempo.
         self._lc_autozero_band_n: float = 0.30   # só atua com |F| < banda
         self._lc_autozero_rate: float = 0.001    # passo/amostra (~τ 10 s @100 Hz)
-        self._lc_tare_stable_n: float = 0.20     # ptp máx no buffer p/ aceitar tare
+        # Deriva máx (mediana 2ª metade vs 1ª, em N) p/ aceitar tare. 0,20 N
+        # era da era 5 kgf; na célula de 100 kg (~0,8 mV/N) equivalia a
+        # 0,16 mV — abaixo do piso de ruído, recusaria sempre.
+        self._lc_tare_stable_n: float = 0.50
         # Força de contato tare-compensada (N, positiva = compressão).
         # Publicada em /load_cell/force_net e usada pelo explorer no PID.
         self._lc_force_net: float = 0.0
@@ -955,7 +964,7 @@ class PalpationGUI(Node):
                 color, status = TEXT_MUTED, 'no contact'
             self._sens_force_lbl.config(text=f'{f_net:+6.2f}  N', fg=color)
             self._sens_status_lbl.config(text=status, fg=color)
-            lc_bruto = ((lc_v - lc_ic) / lc_slope
+            lc_bruto = ((lc_ic - lc_v) / lc_slope
                         if lc_cal and abs(lc_slope) > 1e-9 else 0.0)
             self._sens_raw_lbl.config(text=f'{lc_bruto:+6.2f} N')
             self._sens_volt_lbl.config(text=f'{lc_v:.6f} V')
@@ -1081,7 +1090,7 @@ class PalpationGUI(Node):
             lc_ic    = self._lc_calib_intercept
             lc_cal   = self._lc_calibrated
             f_net    = self._lc_force_net
-            lc_bruto = ((lc_v - lc_ic) / lc_slope
+            lc_bruto = ((lc_ic - lc_v) / lc_slope
                         if lc_cal and abs(lc_slope) > 1e-9 else 0.0)
             try:
                 self._rec_writer.writerow([
@@ -3163,7 +3172,7 @@ class PalpationGUI(Node):
         self._build_lc_leitura_tab(self._scrollable(tab_leitura))
         self._build_lc_calibration_tab(self._scrollable(tab_calib))
         self._restore_lc_calib_ui()
-        self.root.after(100, self._refresh_lc_panel)
+        self.root.after(50, self._refresh_lc_panel)
 
     def _build_lc_leitura_tab(self, root: tk.Frame):
         # ── Painel de conexão do nó UDP ──────────────────────────────────
@@ -3277,7 +3286,9 @@ class PalpationGUI(Node):
         tk.Label(
             zero_card,
             text='Remove everything from the sensor and click Capture Zero.\n'
-                 'This point anchors the line at F = 0 N and removes the offset.',
+                 'This point anchors the line at F = 0 N and removes the offset.\n'
+                 'Firmware Re-zero re-locks the ESP32 boot offset (rest → 0 V) '
+                 'over USB.',
             font=FONT_LBL, bg=PANEL, fg=TEXT_MUTED, justify='left',
         ).pack(anchor='w', pady=(0, 8))
         zero_btn_row = tk.Frame(zero_card, bg=PANEL)
@@ -3290,6 +3301,14 @@ class PalpationGUI(Node):
             font=FONT_LBL, relief='flat', bd=0, padx=14, pady=7,
             cursor='hand2',
         ).pack(side='left')
+        tk.Button(
+            zero_btn_row, text='⟲  Firmware Re-zero',
+            command=self._lc_fw_rezero,
+            bg=BTN_NEUTRAL, fg=TEXT,
+            activebackground=_shade(BTN_NEUTRAL, -0.08), activeforeground=TEXT,
+            font=FONT_LBL, relief='flat', bd=0, padx=14, pady=7,
+            cursor='hand2',
+        ).pack(side='left', padx=(8, 0))
         self.lc_zero_status_lbl = tk.Label(
             zero_btn_row,
             text='Not captured',
@@ -3301,7 +3320,8 @@ class PalpationGUI(Node):
 
         self.lc_step_lbl = tk.Label(
             wiz_card,
-            text='Enter the mass and click Capture Reading (min. 2 points)',
+            text='Capture the zero (Step 1), then enter the mass and click '
+                 'Capture Reading (≥1 point)',
             font=FONT_LBL, bg=PANEL, fg=PRIMARY)
         self.lc_step_lbl.pack(anchor='w', pady=(0, 4))
         tk.Label(
@@ -3409,9 +3429,9 @@ class PalpationGUI(Node):
         zero_v    = self._lc_zero_voltage
 
         # ── Painel "Calibração Vigente" ──────────────────────────────
-        zero_note = f'  | zero={zero_v:.4f} V' if zero_v is not None else '  | no zero'
+        zero_note = f'  | zero={zero_v:.6f} V' if zero_v is not None else '  | no zero'
         self.lc_curr_calib_lbl.config(
-            text=f'slope={slope:.4f}  intercept={intercept:.4f}'
+            text=f'slope={slope:.6f}  intercept={intercept:.6f}'
                  f'  ({n} pontos){zero_note}',
             fg=OK)
 
@@ -3421,7 +3441,7 @@ class PalpationGUI(Node):
         # ── Zero capturado ────────────────────────────────────────────
         if zero_v is not None:
             self.lc_zero_status_lbl.config(
-                text=f'V₀ = {zero_v:.4f} V  ✓  (salvo)', fg=OK)
+                text=f'V₀ = {zero_v:.6f} V  ✓  (salvo)', fg=OK)
 
         # ── Pontos do wizard (lista editável) ────────────────────────
         self._lc_refresh_points()
@@ -3432,7 +3452,7 @@ class PalpationGUI(Node):
         if zero_v is not None:
             all_forces   = [0.0]   + all_forces
             all_voltages = [zero_v] + all_voltages
-        result_txt = f'slope={slope:.4f}  intercept={intercept:.4f}'
+        result_txt = f'slope={slope:.6f}  intercept={intercept:.6f}'
         if len(all_forces) >= 2:
             v_fit  = [slope * f + intercept for f in all_forces]
             ss_res = sum((v - vf) ** 2 for v, vf in zip(all_voltages, v_fit))
@@ -3468,16 +3488,22 @@ class PalpationGUI(Node):
                 'Waiting for sensor readings — check the UDP connection.', WARN)
             return
 
-        # Usa só a parte mais recente do buffer (~1 s) e exige ESTABILIDADE:
-        # tarar com o sinal ainda assentando (logo após conectar/tocar) enviesa
-        # o zero. Mede o pico-a-pico convertido p/ N e recusa se passar do limite.
+        # Usa só a parte mais recente do buffer (~1 s) e exige ESTABILIDADE
+        # por DERIVA (mediana da 2ª metade vs 1ª, convertida p/ N) — não por
+        # pico-a-pico, que cresce com a janela mesmo em sinal estacionário e
+        # nunca passaria com o ruído normal (~mV) desta montagem. Tarar com o
+        # sinal ainda assentando (logo após conectar/tocar) enviesa o zero.
         win = buf[-100:]
-        ptp_v = max(win) - min(win)
-        ptp_n = ptp_v / abs(slope) if abs(slope) > 1e-9 else ptp_v
-        if ptp_n > self._lc_tare_stable_n:
+        half = len(win) // 2
+        m1 = sorted(win[:half])[half // 2]
+        m2 = sorted(win[half:])[len(win[half:]) // 2]
+        drift_n = (abs(m2 - m1) / abs(slope)
+                   if abs(slope) > 1e-9 else abs(m2 - m1))
+        if drift_n > self._lc_tare_stable_n:
             self._set_status(
-                f'Sensor unstable for taring (±{ptp_n:.2f} N) — remove any '
-                f'load and wait for the value to settle before taring.', WARN)
+                f'Sensor drifting ({drift_n:.2f} N across the window) — '
+                f'remove any load and wait for it to settle before taring.',
+                WARN)
             return
 
         avg_v = sum(win) / len(win)
@@ -3486,7 +3512,8 @@ class PalpationGUI(Node):
             self._lc_tare_done = True
 
         self._set_status(
-            f'Sensor tared — reference: {avg_v:.4f} V (stable ±{ptp_n:.3f} N).', OK)
+            f'Sensor tared — reference: {avg_v:.6f} V '
+            f'(drift {drift_n:.3f} N in the window).', OK)
 
     # ── Célula de carga — fallback serial (ESP32 sem WiFi) ───────────
     def _start_lc_serial(self) -> None:
@@ -3530,6 +3557,7 @@ class PalpationGUI(Node):
         with self._lock:
             self._lc_voltage_raw = float(v_raw)
             self._lc_voltage_raw_ts = time.time()
+            self._lc_voltage_raw_buf.append((time.monotonic(), float(v_raw)))
         self._ingest_lc_voltage(v)
 
     # ── Callbacks ROS — célula de carga ──────────────────────────────
@@ -3550,11 +3578,46 @@ class PalpationGUI(Node):
             tare_v     = self._lc_tare_voltage
             slope      = self._lc_calib_slope
             calibrated = self._lc_calibrated
+            buf_tail = (list(self._lc_voltage_buf)[-self._LC_CAPTURE_WIN_N:]
+                        if (calibrated and not tare_done) else None)
+
+        # Tare AUTOMÁTICO de inicialização: o V₀ salvo na calibração envelhece
+        # (deriva térmica/creep) e o auto-zero lento só atua DENTRO da banda
+        # de ±0,30 N — um offset de partida maior que isso ficava para sempre.
+        # Na primeira janela estável após o boot, a referência é tarada aqui.
+        # Recusa se a força aparente vs. V₀ passar de _LC_AUTOTARE_MAX_N:
+        # acima disso pode ser carga REAL apoiada no sensor, e engolir carga
+        # real no tare é pior que mostrar offset — aí o operador decide.
+        if (buf_tail is not None and abs(slope) > 1e-9
+                and len(buf_tail) >= self._LC_CAPTURE_WIN_N):
+            # Estabilidade por DERIVA (mediana da 2ª metade vs 1ª), não por
+            # pico-a-pico: ptp cresce com a janela mesmo em sinal estacionário
+            # e nunca passaria com o ruído normal (~mV) desta montagem.
+            half = len(buf_tail) // 2
+            m1 = sorted(buf_tail[:half])[half // 2]
+            m2 = sorted(buf_tail[half:])[len(buf_tail[half:]) // 2]
+            stable = abs(m2 - m1) <= self._LC_CAPTURE_STABLE_V
+            avg = sum(buf_tail) / len(buf_tail)
+            zero_v = self._lc_zero_voltage
+            drift_n = (abs((avg - zero_v) / slope)
+                       if zero_v is not None else 0.0)
+            if stable and drift_n <= self._LC_AUTOTARE_MAX_N:
+                with self._lock:
+                    self._lc_tare_voltage = avg
+                    self._lc_tare_done = True
+                tare_done, tare_v = True, avg
+                self.get_logger().info(
+                    f'[LC] auto-tare na inicialização: ref={avg:.6f} V '
+                    f'(deriva de {drift_n:+.2f} N vs. zero da calibração)')
+
         if calibrated and tare_done and abs(slope) > 1e-9:
-            # Calibração feita em tração (pesos pendurados) → (v - tare_v)/slope
-            # sai positivo em TRAÇÃO. Invertemos para a convenção do sistema:
-            # compressão = POSITIVO (PID e limites de segurança dependem disso).
-            f_net = (v - tare_v) / slope   # compressão → positivo, tração → negativo
+            # Convenção do sistema: compressão = POSITIVO (PID, limites de
+            # segurança e o painel dependem disso). A calibração é feita em
+            # tração (pesos pendurados) com F positivo, então (v − tare)/slope
+            # é positivo em TRAÇÃO — invertemos: (tare − v)/slope. Mesma
+            # fórmula do painel (_refresh_lc_panel) e independente da
+            # polaridade da fiação da célula (o sinal do slope a absorve).
+            f_net = (tare_v - v) / slope   # compressão → positivo
             # Auto-zero lento: só em repouso (fase estável, sem palpação ativa)
             # e dentro da banda morta — puxa a referência devagar p/ cancelar
             # deriva DC sem comer força real durante uma medição.
@@ -3563,7 +3626,7 @@ class PalpationGUI(Node):
                 with self._lock:
                     self._lc_tare_voltage += self._lc_autozero_rate * (v - self._lc_tare_voltage)
                     tare_v = self._lc_tare_voltage
-                f_net = (v - tare_v) / slope
+                f_net = (tare_v - v) / slope
             out = Float32()
             out.data = float(f_net)
             try:
@@ -3572,10 +3635,12 @@ class PalpationGUI(Node):
                 pass
 
     def _cb_lc_voltage_raw(self, msg: Float32) -> None:
-        """Recebe /load_cell/voltage_raw (tensão SEM filtro) — só p/ display."""
+        """Recebe /load_cell/voltage_raw (tensão SEM filtro) — display e
+        buffer das capturas de calibração (zero estacionário/pontos)."""
         with self._lock:
             self._lc_voltage_raw = float(msg.data)
             self._lc_voltage_raw_ts = time.time()
+            self._lc_voltage_raw_buf.append((time.monotonic(), float(msg.data)))
 
     def _cb_lc_force_net_gui(self, msg: Float32) -> None:
         """Recebe /load_cell/force_net → atualiza display da aba Palpação."""
@@ -3693,29 +3758,121 @@ class PalpationGUI(Node):
                     f'Não consegui versionar a calibração no repo: {exc}')
 
     # ── Calibração — wizard ───────────────────────────────────────────
+    # Janela de captura dos pontos de calibração. Média da CAUDA do buffer
+    # (janela recente), nunca do buffer inteiro: o deque guarda 200 amostras
+    # (2,5 s @ 80 Hz, 20 s @ 10 Hz) e a média completa arrastava leituras de
+    # ANTES do peso assentar para dentro do ponto — cada mV de viés aqui vira
+    # ~1,2 N de erro na célula de 100 kg (sens. ≈ 0,86 mV/N).
+    _LC_CAPTURE_WIN_N    = 100    # janela do auto-tare (stream filtrado)
+    _LC_CAPTURE_STABLE_V = 5e-4   # ptp máx da janela do auto-tare (V)
+    _LC_AUTOTARE_MAX_N   = 2.0    # auto-tare só até este desvio vs. V₀ (N)
+    # Captura de calibração (zero estacionário e pontos): janela do stream
+    # CRU dimensionada POR TEMPO — a taxa do HX711 depende do pino RATE
+    # (10 vs 80 Hz); janelas em nº de amostras viravam 40 s de espera a
+    # 10 Hz. NÃO gateia por pico-a-pico: ptp cresce com o tamanho da janela
+    # mesmo em sinal estacionário. O que envenena a média não é ruído — é
+    # DERIVA: ruído de média zero é diluído por √N na média; deriva vira
+    # viés direto.
+    _LC_RAW_WIN_S       = 4.0   # janela de captura (s)
+    _LC_RAW_MIN_S       = 2.0   # span mínimo de dado dentro da janela (s)
+    _LC_RAW_MIN_SAMPLES = 15
+    _LC_RAW_NOISE_V = 3e-3  # σ robusto máx (V) — acima disso tem algo errado
+    _LC_RAW_DRIFT_FLOOR_V = 1e-4  # piso do limiar de deriva (V)
+
+    def _lc_capture_avg(self) -> float | None:
+        """Média ESTACIONÁRIA robusta dos últimos _LC_RAW_WIN_S segundos do
+        stream CRU (pré-filtro), ou None (com status numérico explicando).
+
+        Dois testes independentes:
+        1. Ruído: σ robusto (1.4826·MAD) ≤ _LC_RAW_NOISE_V. Generoso de
+           propósito — a média de N amostras reduz o ruído por √N.
+        2. Deriva/degrau: mediana da metade recente vs a antiga, com limiar
+           adaptativo ao ruído medido (4× o erro-padrão da diferença de
+           medianas) — separa deriva real (peso recém-colocado, célula
+           aquecendo) de flutuação estatística.
+        A média final descarta outliers além de 4σ (EMI, toque acidental).
+        Gate em VOLTS, não em N: precisa funcionar antes de existir slope."""
+        now = time.monotonic()
+        with self._lock:
+            pairs = [(t, v) for t, v in self._lc_voltage_raw_buf
+                     if now - t <= self._LC_RAW_WIN_S]
+        if (len(pairs) < self._LC_RAW_MIN_SAMPLES
+                or pairs[-1][0] - pairs[0][0] < self._LC_RAW_MIN_S):
+            self._set_status(
+                'Waiting for raw sensor readings — check the connection.', WARN)
+            return None
+        ts  = np.asarray([t for t, _ in pairs], dtype=float)
+        win = np.asarray([v for _, v in pairs], dtype=float)
+        med   = float(np.median(win))
+        sigma = 1.4826 * float(np.median(np.abs(win - med)))
+        if sigma > self._LC_RAW_NOISE_V:
+            self._set_status(
+                f'Raw noise too high (σ={sigma * 1e3:.2f} mV > '
+                f'{self._LC_RAW_NOISE_V * 1e3:.1f} mV) — check cable/shield/'
+                'EMI before calibrating.', WARN)
+            return None
+        mid = now - self._LC_RAW_WIN_S / 2.0
+        old, new = win[ts < mid], win[ts >= mid]
+        if len(old) >= 3 and len(new) >= 3:
+            m1, m2 = float(np.median(old)), float(np.median(new))
+            se = 1.25 * sigma * math.sqrt(1.0 / len(old) + 1.0 / len(new))
+            drift_lim = max(self._LC_RAW_DRIFT_FLOOR_V, 4.0 * se)
+            if abs(m2 - m1) > drift_lim:
+                self._set_status(
+                    f'Signal drifting ({(m2 - m1) * 1e3:+.3f} mV across the '
+                    f'window, limit ±{drift_lim * 1e3:.3f}) — wait for it to '
+                    'settle and try again.', WARN)
+                return None
+        tol = max(4.0 * sigma, 1e-6)   # piso p/ σ≈0 (sinal quieto)
+        inliers = win[np.abs(win - med) <= tol]
+        return float(np.mean(inliers))
+
+    def _lc_fw_rezero(self) -> None:
+        """Manda 'Z' ao firmware pela USB: re-trava o offset de boot com a
+        célula em repouso (v_sensor volta a ~0 V). O stream some por ~0,5 s
+        enquanto o firmware coleta a janela do novo zero. Depois, capture o
+        zero da calibração normalmente (Passo 1) — o V₀ ficará ≈ 0 V.
+
+        ATENÇÃO: qualquer carga presente no momento do re-zero é engolida
+        pelo offset e some da leitura — só usar com a célula descarregada."""
+        src = getattr(self, '_lc_serial_source', None)
+        if src is not None and src.send(b'Z'):
+            with self._lock:
+                # O nível DC vai mudar de degrau: zera buffers p/ o gate de
+                # deriva não reprovar a próxima captura à toa e o tare/auto-
+                # tare re-assentarem sobre o novo zero.
+                self._lc_voltage_buf.clear()
+                self._lc_voltage_raw_buf.clear()
+                self._lc_tare_done = False
+            self._set_status(
+                'Firmware re-zero sent — keep the cell unloaded; stream '
+                'returns in ~1 s with rest at 0 V. Then click Capture Zero.',
+                OK)
+        else:
+            self._set_status(
+                'XIAO USB serial not available — cannot send the re-zero '
+                'command.', WARN)
+
     def _lc_capture_zero(self) -> None:
         """Captura a tensão do sensor sem nenhuma força aplicada (F = 0 N).
 
         Este ponto é incluído automaticamente na regressão, ancorando a reta
         na origem real do sensor e eliminando o offset residual do intercepto.
         """
-        with self._lock:
-            buf = list(self._lc_voltage_buf)
-        if len(buf) < 5:
-            self._set_status(
-                'Waiting for sensor readings — check the UDP connection.', WARN)
+        v0 = self._lc_capture_avg()
+        if v0 is None:
             return
-        v0 = sum(buf) / len(buf)
         self._lc_zero_voltage = v0
         self.lc_zero_status_lbl.config(
-            text=f'V₀ = {v0:.4f} V  ✓', fg=OK)
-        self._set_status(f'Zero capturado: {v0:.4f} V (F = 0 N)', OK)
+            text=f'V₀ = {v0:.6f} V  ✓', fg=OK)
+        self._set_status(f'Zero capturado: {v0:.6f} V (F = 0 N)', OK)
 
     def _lc_can_compute(self) -> bool:
-        """Há pontos suficientes para a regressão? polyfit precisa de ≥2
-        pontos TOTAIS — o zero capturado conta como um deles."""
-        n = len(self._lc_calib_points)
-        return n >= 2 or (n >= 1 and self._lc_zero_voltage is not None)
+        """Zero estacionário capturado + ≥1 peso padrão. O zero é OBRIGATÓRIO:
+        a reta é sempre ancorada em (0, V₀) — sem ele o intercepto flutuaria
+        com o ruído dos pontos e o repouso não daria 0 N por construção."""
+        return (self._lc_zero_voltage is not None
+                and len(self._lc_calib_points) >= 1)
 
     def _lc_render_saved_points(self, points) -> None:
         """Repinta o painel 'Current Calibration' com a lista (de tamanho
@@ -3727,7 +3884,7 @@ class PalpationGUI(Node):
             tk.Label(
                 self.lc_saved_points_box,
                 text=f'  {i + 1}.  {mass_kg:.3f} kg  →  {force_n:.3f} N'
-                     f'  →  {v_sensor:.4f} V  ✓',
+                     f'  →  {v_sensor:.6f} V  ✓',
                 font=FONT_MONO_S, bg=PANEL, fg=OK, anchor='w').pack(fill='x', pady=1)
 
     def _lc_refresh_points(self) -> None:
@@ -3753,7 +3910,7 @@ class PalpationGUI(Node):
 
             mass_var = tk.DoubleVar(value=round(mass_kg, 3))
             tk.Spinbox(
-                row, from_=0.001, to=10.0, increment=0.001,
+                row, from_=0.001, to=LOAD_CELL_RATED_KG, increment=0.001,
                 textvariable=mass_var, width=7, font=FONT_MONO_S,
                 justify='right', relief='flat', bd=0,
                 highlightthickness=1, highlightbackground=BORDER,
@@ -3766,7 +3923,7 @@ class PalpationGUI(Node):
                 row, text=f'→ {mass_kg * 9.80665:.3f} N', font=FONT_MONO_S,
                 bg=PANEL, fg=TEXT_DIM, anchor='w')
             force_lbl.pack(side='left')
-            tk.Label(row, text=f'→ {v_sensor:.4f} V', font=FONT_MONO_S,
+            tk.Label(row, text=f'→ {v_sensor:.6f} V', font=FONT_MONO_S,
                      bg=PANEL, fg=OK, anchor='w').pack(side='left', padx=(6, 0))
 
             # ✕ Remover e ⟳ Regravar à direita. lambda com i=i para fixar o
@@ -3792,9 +3949,10 @@ class PalpationGUI(Node):
             self._lc_point_rows.append({'frame': row, 'mass_var': mass_var})
 
         n = len(pts)
-        if n < 2 and not self._lc_can_compute():
+        if not self._lc_can_compute():
             self.lc_step_lbl.config(
-                text=f'{n} point(s) — min. 2 (or 1 + zero) to compute',
+                text=f'{n} point(s) — capture the zero (Step 1) + at least '
+                     '1 point to compute',
                 fg=PRIMARY)
         else:
             self.lc_step_lbl.config(
@@ -3822,17 +3980,13 @@ class PalpationGUI(Node):
         preservando a massa. Use quando um ponto saiu ruidoso/errado."""
         if not (0 <= i < len(self._lc_calib_points)):
             return
-        with self._lock:
-            buf = list(self._lc_voltage_buf)
-        if len(buf) < 5:
-            self._set_status(
-                'Waiting for sensor readings — check the UDP connection.', WARN)
+        avg_v = self._lc_capture_avg()
+        if avg_v is None:
             return
-        avg_v = sum(buf) / len(buf)
         mass_kg, _old = self._lc_calib_points[i]
         self._lc_calib_points[i] = (mass_kg, avg_v)
         self._lc_refresh_points()
-        self._set_status(f'Point {i + 1} re-recorded: {avg_v:.4f} V', OK)
+        self._set_status(f'Point {i + 1} re-recorded: {avg_v:.6f} V', OK)
 
     def _lc_delete_point(self, i: int) -> None:
         """Remove o ponto i da lista."""
@@ -3843,16 +3997,9 @@ class PalpationGUI(Node):
         self._set_status(f'Point {i + 1} removed.', OK)
 
     def _lc_calib_capture(self) -> None:
-        with self._lock:
-            buf = list(self._lc_voltage_buf)
-
-        if len(buf) < 5:
-            self._set_status(
-                'Waiting for load-cell readings (check the UDP connection).',
-                WARN)
+        avg_v = self._lc_capture_avg()
+        if avg_v is None:
             return
-
-        avg_v = sum(buf) / len(buf)
 
         try:
             mass_kg = float(self.lc_mass_var.get())
@@ -3867,45 +4014,37 @@ class PalpationGUI(Node):
         idx = len(self._lc_calib_points)
         self._lc_refresh_points()
         self._set_status(
-            f'Point {idx} captured: {mass_kg:.3f} kg → {avg_v:.4f} V', OK)
+            f'Point {idx} captured: {mass_kg:.3f} kg → {avg_v:.6f} V', OK)
 
     def _lc_calib_compute(self) -> None:
         if not self._lc_can_compute():
             self._set_status(
-                'At least 2 points (or 1 point + the zero) to calibrate.', DANGER)
+                'Capture the stationary zero (Step 1) and at least 1 standard '
+                'weight point before computing.', DANGER)
             return
 
         forces_load   = [m * 9.80665 for m, _v in self._lc_calib_points]
         voltages_load = [v            for _m, v in self._lc_calib_points]
 
+        # Calibração ANCORADA no zero estacionário: a reta é OBRIGADA a passar
+        # por (F=0, V=V₀) e ajustamos SÓ o ganho — mínimos quadrados pela
+        # origem de (v − V₀) contra F: slope = Σ(F·Δv)/Σ(F²), intercept = V₀.
+        # Com UM peso padrão isso degenera exatamente no cálculo determinístico
+        # slope = (V − V₀)/(m·g); com vários, é a média dos slopes por ponto
+        # ponderada por F² (pontos pesados mandam — são os de maior SNR).
+        # V₀ nunca é ajustado pela regressão: é o valor travado no Passo 1.
         zero_v = self._lc_zero_voltage
-        if zero_v is not None:
-            # Calibração ANCORADA no repouso: a reta é OBRIGADA a passar por
-            # (F=0, V=V₀) e ajustamos SÓ o ganho — mínimos quadrados pela origem
-            # de (v − V₀) contra F: slope = Σ(F·Δv)/Σ(F²), intercept = V₀.
-            #
-            # Por que não polyfit livre: o intercepto flutuaria e, se os
-            # pontos com carga extrapolam V≠V₀ em F=0, a força em repouso sai
-            # em vários N. Ancorar garante F(repouso)=0 por construção.
-            F  = np.asarray(forces_load, dtype=float)
-            dv = np.asarray(voltages_load, dtype=float) - zero_v
-            denom = float(np.sum(F * F))
-            if denom < 1e-12:
-                self._set_status('Point forces too small for the fit.',
-                                 DANGER)
-                return
-            slope     = float(np.sum(F * dv) / denom)
-            intercept = float(zero_v)
-            forces    = [0.0] + forces_load
-            voltages  = [zero_v] + voltages_load
-        else:
-            # Sem zero capturado: regressão livre. ATENÇÃO — sem âncora o repouso
-            # pode não dar 0; capture o Zero (Passo 1) para ancorar a reta.
-            forces   = forces_load
-            voltages = voltages_load
-            coeffs    = np.polyfit(forces, voltages, 1)
-            slope     = float(coeffs[0])
-            intercept = float(coeffs[1])
+        F  = np.asarray(forces_load, dtype=float)
+        dv = np.asarray(voltages_load, dtype=float) - zero_v
+        denom = float(np.sum(F * F))
+        if denom < 1e-12:
+            self._set_status('Point forces too small for the fit.',
+                             DANGER)
+            return
+        slope     = float(np.sum(F * dv) / denom)
+        intercept = float(zero_v)
+        forces    = [0.0] + forces_load
+        voltages  = [zero_v] + voltages_load
 
         if abs(slope) < 1e-9:
             self._set_status('Gain ≈ 0 — inconsistent points, recalibrate.', DANGER)
@@ -3917,6 +4056,23 @@ class PalpationGUI(Node):
         ss_tot = float(np.var(voltages)) * len(voltages)
         r2     = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else 1.0
 
+        # Resíduo de cada ponto CONVERTIDO EM NEWTONS (resid_V/slope): é o
+        # erro de força que aquele ponto carrega. Aponta o pior ponto para o
+        # usuário regravar — R² baixo sozinho não diz QUAL ponto estragou.
+        resid_n = (np.array(voltages) - v_fit) / slope
+        worst_i = int(np.argmax(np.abs(resid_n)))
+        worst_n = float(resid_n[worst_i])
+        # forces[0] é o zero quando ancorado; os pontos do wizard começam em
+        # worst_i-1 nesse caso.
+        worst_is_zero = (zero_v is not None and worst_i == 0)
+        worst_label = ('zero' if worst_is_zero
+                       else f'point {worst_i if zero_v is not None else worst_i + 1}')
+        for i, rn in enumerate(resid_n):
+            lbl = ('zero' if (zero_v is not None and i == 0)
+                   else f'pt{i if zero_v is not None else i + 1}')
+            self.get_logger().info(
+                f'[LC calib] {lbl}: F={forces[i]:7.3f} N  resid={rn:+6.2f} N')
+
         with self._lock:
             self._lc_calib_slope     = slope
             self._lc_calib_intercept = intercept
@@ -3926,8 +4082,8 @@ class PalpationGUI(Node):
 
         self._save_lc_calib(slope, intercept, zero_v)
 
-        zero_note = f'  | zero={zero_v:.4f} V' if zero_v is not None else '  | no zero'
-        result = f'slope={slope:.4f}  intercept={intercept:.4f}  R²={r2:.4f}{zero_note}'
+        zero_note = f'  | zero={zero_v:.6f} V' if zero_v is not None else '  | no zero'
+        result = f'slope={slope:.6f}  intercept={intercept:.6f}  R²={r2:.4f}{zero_note}'
         # R² baixo com a reta ancorada = os pontos com carga não são colineares
         # com o repouso → folga/pré-carga (zona morta) perto de zero, ou um
         # ponto ruidoso. O ganho ancorado fica enviesado e a força no fundo de
@@ -3936,15 +4092,16 @@ class PalpationGUI(Node):
         self.lc_result_lbl.config(text=result, fg=(WARN if low_q else OK))
         if low_q:
             self._set_status(
-                f'Calibrated (rest=0), but low R²={r2:.3f} — points non-linear '
-                'near zero (backlash/preload in the setup?). Use ✕/Re-record to '
-                f'fix the bad points and recompute.  {result}', WARN)
+                f'Calibrated (rest=0), but low R²={r2:.3f} — worst: '
+                f'{worst_label} ({worst_n:+.2f} N off the line). Use '
+                '✕/Re-record on it and recompute; with the 100 kg cell prefer '
+                f'masses ≥ 5 kg (small weights drown in noise).  {result}', WARN)
         else:
             self._set_status(f'Calibration complete! {result}', OK)
 
         # Atualiza card "Calibração Vigente" com os pontos em verde
         self.lc_curr_calib_lbl.config(
-            text=f'slope={slope:.4f}  intercept={intercept:.4f}'
+            text=f'slope={slope:.6f}  intercept={intercept:.6f}'
                  f'  ({len(self._lc_calib_points)} points){zero_note}',
             fg=OK)
         self._lc_render_saved_points(self._lc_calib_points)
@@ -3959,7 +4116,8 @@ class PalpationGUI(Node):
         self.lc_mass_var.set(0.100)
         self.lc_zero_status_lbl.config(text='Not captured', fg=WARN)
         self.lc_step_lbl.config(
-            text='Enter the mass and click Capture Reading (min. 2 points)',
+            text='Capture the zero (Step 1), then enter the mass and click '
+                 'Capture Reading (≥1 point)',
             fg=PRIMARY)
         self.lc_capture_btn.config(state='normal')
         self.lc_compute_btn.config(state='disabled')
@@ -4211,7 +4369,7 @@ class PalpationGUI(Node):
                 fg=OK if abs(force_total) < 100 else WARN)
             self.lc_calib_status_lbl.config(
                 text=f'Calibrado — {n_pts} pontos | '
-                     f'slope={slope:.4f}  intercept={intercept:.4f}',
+                     f'slope={slope:.6f}  intercept={intercept:.6f}',
                 fg=OK)
 
             # Força de compressão ⊥ mesa: calibração em tração → sinal invertido
@@ -4222,7 +4380,7 @@ class PalpationGUI(Node):
                 self.lc_normal_force_lbl.config(
                     text=f'{f_compress:+6.2f}  N', fg=color)
                 self.lc_tare_status_lbl.config(
-                    text=f'Ref. tare: {tare_v:.4f} V  '
+                    text=f'Ref. tare: {tare_v:.6f} V  '
                          f'| tension calibration, compression by symmetry',
                     fg=OK)
             else:
@@ -4247,7 +4405,7 @@ class PalpationGUI(Node):
 
         if calibrated:
             self.lc_curr_calib_lbl.config(
-                text=f'slope={slope:.4f}  intercept={intercept:.4f}  ({n_pts} pontos)',
+                text=f'slope={slope:.6f}  intercept={intercept:.6f}  ({n_pts} pontos)',
                 fg=OK)
         else:
             self.lc_curr_calib_lbl.config(
@@ -4270,7 +4428,9 @@ class PalpationGUI(Node):
                 text=self._esp32_status_lbl.cget('text'),
                 fg=self._esp32_status_lbl.cget('fg'))
 
-        self.root.after(100, self._refresh_lc_panel)
+        # 50 ms (20 Hz): mesmo fps dos gráficos. A 100 ms o rótulo somava até
+        # 100 ms de atraso visual sobre um dado que chega a 80 Hz.
+        self.root.after(50, self._refresh_lc_panel)
 
     # ──────────────────────────────────────────────────────────────────
     # Aba "Poses & Movimentos"
@@ -6174,9 +6334,9 @@ class PalpationGUI(Node):
             self.force_status_lbl.config(text=status, fg=color)
             self.err_value_lbl.config(text=f'{tgt_force:.1f}  N', fg=TEXT)
             self.fz_lbl.config(text=f'{f_net:+6.2f} N')
-            tare_txt = f'{lc_tare_v:.4f} V' if lc_tared else 'not done'
+            tare_txt = f'{lc_tare_v:.6f} V' if lc_tared else 'not done'
             self.fx_lbl.config(text=tare_txt)
-            lc_bruto = (lc_v - lc_ic) / lc_slope if lc_cal and abs(lc_slope) > 1e-9 else 0.0
+            lc_bruto = (lc_ic - lc_v) / lc_slope if lc_cal and abs(lc_slope) > 1e-9 else 0.0
             self.fy_lbl.config(text=f'{lc_bruto:+6.2f} N')
 
         phase_color = {

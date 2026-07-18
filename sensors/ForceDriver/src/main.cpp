@@ -59,7 +59,28 @@ static HX711 hx;
 // LC_FW_VOLTAGE_OFFSET do constants.py.
 const float HX_VREF     = 3.3f;
 const float COUNTS_TO_V = HX_VREF / 16777216.0f;
-const float V_OFFSET    = 0.0f;   // zero da ponte deriva; a tare da GUI cuida
+
+// ── Auto-zero de boot ───────────────────────────────────────────────────
+// A célula é bidirecional e o zero elétrico da ponte cai em qualquer lugar
+// (inclusive negativo). O firmware trava o repouso como offset ao LIGAR:
+// v_sensor transmitido = v_bruto − offset, então a GUI recebe ~0 V em
+// repouso e massa aplicada vira tensão > 0. REQUISITO: ligar/re-zerar com
+// a célula EM REPOUSO — carga presente no boot é engolida pelo offset.
+// Comando 'Z' na USB refaz o zero sob demanda (botão na GUI).
+// A coleta exige janela estável (faixa ≤ ZERO_STABLE_V) e recomeça sozinha
+// enquanto o sinal deriva; nenhuma amostra é transmitida sem zero travado.
+#define ZERO_SAMPLES   40       // ~0,5 s @ 80 Hz
+#define ZERO_STABLE_V  0.002f   // faixa máx aceita durante a coleta (V)
+static float g_v_offset = 0.0f;
+static bool  g_zeroed   = false;
+static float g_zero_acc = 0.0f, g_zero_min = 0.0f, g_zero_max = 0.0f;
+static int   g_zero_cnt = 0;
+
+static void zero_restart()
+{
+    g_zeroed   = false;
+    g_zero_cnt = 0;
+}
 
 // Amostra na rede: little-endian '<IIf' (12 B), 1 por datagrama — formato
 // espelhado no force_receiver e no classificador externo. A taxa é ditada
@@ -212,9 +233,11 @@ void loop()
         for (int i = 0; i < MAX_SUBSCRIBERS; i++)
             if (g_subs[i].used &&
                 hb_ms - g_subs[i].last_hello_ms < HELLO_TIMEOUT_MS) subs++;
-        Serial.printf("# wifi=%s status=%d subs=%d amostras=%lu\n",
+        Serial.printf("# wifi=%s status=%d subs=%d amostras=%lu "
+                      "offset=%.6f zeroed=%d\n",
                       wifi_up ? "up" : "down",
-                      (int)WiFi.status(), subs, (unsigned long)tx_seq);
+                      (int)WiFi.status(), subs, (unsigned long)tx_seq,
+                      g_v_offset, (int)g_zeroed);
     }
 
     if (!wifi_up) {
@@ -264,7 +287,38 @@ void loop()
     long counts = hx.read();
     uint32_t now_us = micros();
 
-    float v_sensor = (float)counts * COUNTS_TO_V - V_OFFSET;
+    float v_raw = (float)counts * COUNTS_TO_V;
+
+#if !SERIAL_TEST
+    // Comando de re-zero pela USB ('Z'): a GUI (ou o monitor serial) pede um
+    // novo zero com a célula em repouso. Lido aqui, no caminho da amostra,
+    // p/ não depender do housekeeping (que só roda com WiFi up).
+    while (Serial.available() > 0) {
+        if (Serial.read() == 'Z') zero_restart();
+    }
+
+    if (!g_zeroed) {
+        if (g_zero_cnt == 0) {
+            g_zero_acc = 0.0f;
+            g_zero_min = g_zero_max = v_raw;
+        }
+        g_zero_acc += v_raw;
+        if (v_raw < g_zero_min) g_zero_min = v_raw;
+        if (v_raw > g_zero_max) g_zero_max = v_raw;
+        g_zero_cnt++;
+        if (g_zero_max - g_zero_min > ZERO_STABLE_V) {
+            g_zero_cnt = 0;            // sinal derivando — recomeça a coleta
+        } else if (g_zero_cnt >= ZERO_SAMPLES) {
+            g_v_offset = g_zero_acc / (float)g_zero_cnt;
+            g_zeroed   = true;
+            Serial.printf("# zero travado: offset=%.6f V (faixa %.3f mV)\n",
+                          g_v_offset, (g_zero_max - g_zero_min) * 1e3f);
+        }
+        return;   // sem zero travado, nenhuma amostra é transmitida
+    }
+#endif
+
+    float v_sensor = v_raw - g_v_offset;
 
     sample_out.seq      = tx_seq++;
     sample_out.t_us     = now_us;
