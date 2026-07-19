@@ -964,7 +964,7 @@ class PalpationGUI(Node):
                 color, status = TEXT_MUTED, 'no contact'
             self._sens_force_lbl.config(text=f'{f_net:+6.2f}  N', fg=color)
             self._sens_status_lbl.config(text=status, fg=color)
-            lc_bruto = ((lc_ic - lc_v) / lc_slope
+            lc_bruto = (abs((lc_ic - lc_v) / lc_slope)   # compressão → estritamente positiva
                         if lc_cal and abs(lc_slope) > 1e-9 else 0.0)
             self._sens_raw_lbl.config(text=f'{lc_bruto:+6.2f} N')
             self._sens_volt_lbl.config(text=f'{lc_v:.6f} V')
@@ -1090,7 +1090,7 @@ class PalpationGUI(Node):
             lc_ic    = self._lc_calib_intercept
             lc_cal   = self._lc_calibrated
             f_net    = self._lc_force_net
-            lc_bruto = ((lc_ic - lc_v) / lc_slope
+            lc_bruto = (abs((lc_ic - lc_v) / lc_slope)   # compressão → estritamente positiva
                         if lc_cal and abs(lc_slope) > 1e-9 else 0.0)
             try:
                 self._rec_writer.writerow([
@@ -3617,7 +3617,12 @@ class PalpationGUI(Node):
             # é positivo em TRAÇÃO — invertemos: (tare − v)/slope. Mesma
             # fórmula do painel (_refresh_lc_panel) e independente da
             # polaridade da fiação da célula (o sinal do slope a absorve).
-            f_net = (tare_v - v) / slope   # compressão → positivo
+            # Compressão SEMPRE positiva (estritamente): valor absoluto no
+            # recebimento blinda contra polaridade de fiação/sinal do slope que,
+            # em alguns setups, faz (tare − v)/slope sair NEGATIVO em compressão
+            # e invalida os testes exportados em /data. Como o rig é de
+            # compressão, a magnitude é a grandeza física de interesse.
+            f_net = abs((tare_v - v) / slope)   # compressão → estritamente positiva
             # Auto-zero lento: só em repouso (fase estável, sem palpação ativa)
             # e dentro da banda morta — puxa a referência devagar p/ cancelar
             # deriva DC sem comer força real durante uma medição.
@@ -3626,7 +3631,7 @@ class PalpationGUI(Node):
                 with self._lock:
                     self._lc_tare_voltage += self._lc_autozero_rate * (v - self._lc_tare_voltage)
                     tare_v = self._lc_tare_voltage
-                f_net = (tare_v - v) / slope
+                f_net = abs((tare_v - v) / slope)   # compressão → estritamente positiva
             out = Float32()
             out.data = float(f_net)
             try:
@@ -4363,7 +4368,7 @@ class PalpationGUI(Node):
         # Sinal invertido em relação à calibração (feita em tração):
         # compressão = positivo, tração = negativo.
         if calibrated and esp32_ok and abs(slope) > 1e-9:
-            force_total = (intercept - voltage) / slope
+            force_total = abs((intercept - voltage) / slope)   # compressão → estritamente positiva
             self.lc_force_lbl.config(
                 text=f'{force_total:6.2f}  N',
                 fg=OK if abs(force_total) < 100 else WARN)
@@ -4375,7 +4380,7 @@ class PalpationGUI(Node):
             # Força de compressão ⊥ mesa: calibração em tração → sinal invertido
             # para que compressão fique positiva.
             if tare_done:
-                f_compress = (tare_v - voltage) / slope   # positivo = compressão, negativo = tração
+                f_compress = abs((tare_v - voltage) / slope)   # compressão → estritamente positiva
                 color = OK if abs(f_compress) < 100 else WARN
                 self.lc_normal_force_lbl.config(
                     text=f'{f_compress:+6.2f}  N', fg=color)
@@ -6336,7 +6341,7 @@ class PalpationGUI(Node):
             self.fz_lbl.config(text=f'{f_net:+6.2f} N')
             tare_txt = f'{lc_tare_v:.6f} V' if lc_tared else 'not done'
             self.fx_lbl.config(text=tare_txt)
-            lc_bruto = (lc_ic - lc_v) / lc_slope if lc_cal and abs(lc_slope) > 1e-9 else 0.0
+            lc_bruto = abs((lc_ic - lc_v) / lc_slope) if lc_cal and abs(lc_slope) > 1e-9 else 0.0   # compressão → estritamente positiva
             self.fy_lbl.config(text=f'{lc_bruto:+6.2f} N')
 
         phase_color = {

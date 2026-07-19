@@ -479,9 +479,16 @@ class TactileExplorer(Node):
     _LC_MAX_PLAUSIBLE_N = 100.0
 
     def _cb_lc_force_net(self, msg: Float32) -> None:
-        """Recebe /load_cell/force_net — compressão positiva, tare-compensada."""
-        val = float(msg.data)
-        if not math.isfinite(val) or abs(val) > self._LC_MAX_PLAUSIBLE_N:
+        """Recebe /load_cell/force_net — compressão positiva, tare-compensada.
+
+        SEGURANÇA (defense-in-depth): a magnitude é o que importa para o teto
+        de _FORCE_ABORT_LIMIT_N (15 N). O sinal é forçado positivo AQUI para
+        que a trava de força NUNCA dependa de um publicador upstream acertar a
+        polaridade — um sinal negativo tornava `fz > _FORCE_SAFE_LIMIT_N` sempre
+        falso e desarmava TODAS as fases em silêncio (foi o que deixou a
+        compressão cravar 128 N na coleta 20260718_150254)."""
+        val = abs(float(msg.data))   # compressão → estritamente positiva (blinda a trava de 15 N)
+        if not math.isfinite(val) or val > self._LC_MAX_PLAUSIBLE_N:
             return
         with self._lc_lock:
             self._lc_force_net = val
